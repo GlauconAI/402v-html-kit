@@ -1,0 +1,21 @@
+{
+  "name": "@402v/html-kit-cli",
+  "version": "0.1.0",
+  "description": "Command-line interface for 402v HTML Kit",
+  "type": "module",
+  "bin": {
+    "402v-html-kit": "./src/cli.mjs"
+  },
+  "exports": "./src/cli.mjs",
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@402v/html-kit-core": "0.1.0",
+    "@402v/theme-402v": "0.1.0"
+  }
+}

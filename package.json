@@ -1,0 +1,26 @@
+{
+  "name": "402v-html-kit-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "node tests/package-smoke/pack-smoke.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6",
+    "yaml": "^2.8.1"
+  },
+  "engines": {
+    "node": ">=22",
+    "npm": ">=10"
+  },
+  "license": "MIT"
+}

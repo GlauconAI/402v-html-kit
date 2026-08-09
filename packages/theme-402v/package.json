@@ -1,0 +1,20 @@
+{
+  "name": "@402v/theme-402v",
+  "version": "0.1.0",
+  "description": "Official 402v visual theme for 402v HTML Kit",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.mts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "types": "./src/index.d.mts",
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

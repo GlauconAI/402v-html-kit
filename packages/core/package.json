@@ -1,0 +1,29 @@
+{
+  "name": "@402v/html-kit-core",
+  "version": "0.1.0",
+  "description": "Deterministic offline HTML artifact compiler and verifier",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.mts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "types": "./src/index.d.mts",
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "acorn": "^8.15.0",
+    "jsdom": "^29.1.1",
+    "parse5": "^8.0.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  }
+}
