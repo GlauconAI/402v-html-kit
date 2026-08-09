@@ -13,6 +13,21 @@ const themeOutput = {
   bodyHtml: '<main data-page="x">Hello</main>',
 };
 
+function expectUnsafeJavaScript(callback: () => unknown) {
+  let caught: unknown;
+  try {
+    callback();
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(ArtifactBuildError);
+  expect((caught as ArtifactBuildError).details).toMatchObject({
+    issues: expect.arrayContaining([
+      expect.objectContaining({ code: "UNSAFE_JAVASCRIPT" }),
+    ]),
+  });
+}
+
 describe("artifact contract v2", () => {
   it("owns neutral metadata, root, data, runtime, and ordering", () => {
     const html = assembleArtifactV2({
@@ -163,5 +178,64 @@ describe("artifact contract v2", () => {
         consumerScripts: ['import("https://example.invalid/x.js")'],
       }),
     ).toThrow(ArtifactBuildError);
+  });
+
+  it("rejects HTML and SVG event-handler attributes during assembly in both modes", () => {
+    const hostileBodies = [
+      '<button OnClIcK="window.clicked=true">Run</button>',
+      '<svg role="img" viewBox="0 0 1 1" aria-labelledby="svg-title" oNlOaD="window.loaded=true"><title id="svg-title">Dot</title></svg>',
+    ];
+    for (const mode of ["note", "interactive"] as const) {
+      for (const bodyHtml of hostileBodies) {
+        expectUnsafeJavaScript(() =>
+          assembleArtifactV2({
+            mode,
+            metadata: { title: "Handlers", description: "", eyebrow: "", lang: "en" },
+            theme: { id: "example", version: "1.0.0" },
+            themeOutput: { ...themeOutput, bodyHtml },
+            dataBlocks: new Map(),
+            consumerScripts: [],
+          }),
+        );
+      }
+    }
+  });
+
+  it("rejects HTML and SVG event-handler attributes during direct verification in both modes", () => {
+    const hostileFragments = [
+      '<button onclick="window.clicked=true">Run</button>',
+      '<svg role="img" viewBox="0 0 1 1" aria-labelledby="direct-svg-title" onload="window.loaded=true"><title id="direct-svg-title">Dot</title></svg>',
+    ];
+    for (const mode of ["note", "interactive"] as const) {
+      const html = assembleArtifactV2({
+        mode,
+        metadata: { title: "Handlers", description: "", eyebrow: "", lang: "en" },
+        theme: { id: "example", version: "1.0.0" },
+        themeOutput,
+        dataBlocks: new Map(),
+        consumerScripts: [],
+      });
+      for (const fragment of hostileFragments) {
+        const candidate = html.replace("Hello</main>", `Hello${fragment}</main>`);
+        expectUnsafeJavaScript(() => verifyArtifactHtml(candidate));
+      }
+    }
+  });
+
+  it("allows benign attributes that contain on outside the attribute-name prefix", () => {
+    for (const mode of ["note", "interactive"] as const) {
+      const html = assembleArtifactV2({
+        mode,
+        metadata: { title: "State", description: "", eyebrow: "", lang: "en" },
+        theme: { id: "example", version: "1.0.0" },
+        themeOutput: {
+          ...themeOutput,
+          bodyHtml: '<main data-on-state="onclick is only text">Safe</main>',
+        },
+        dataBlocks: new Map(),
+        consumerScripts: [],
+      });
+      expect(verifyArtifactHtml(html)).toMatchObject({ ok: true, mode });
+    }
   });
 });

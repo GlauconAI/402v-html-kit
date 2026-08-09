@@ -170,6 +170,27 @@ function verifyDocumentStructure(document, dataNodes, issues) {
   }
 }
 
+function asciiLowercase(value) {
+  return value.replace(/[A-Z]/g, (character) =>
+    String.fromCharCode(character.charCodeAt(0) + 0x20),
+  );
+}
+
+function verifyEventHandlerAttributes(document, issues) {
+  for (const element of document.querySelectorAll("*")) {
+    for (const attribute of element.attributes) {
+      if (asciiLowercase(attribute.name).startsWith("on")) {
+        issues.push(
+          issue(
+            "UNSAFE_JAVASCRIPT",
+            "Artifact elements must not contain event-handler attributes",
+          ),
+        );
+      }
+    }
+  }
+}
+
 export function verifyArtifactV2Html(html, options = undefined) {
   if (typeof html !== "string") {
     failVerification([issue("INVALID_HTML_INPUT", "Artifact HTML must be a string")]);
@@ -215,6 +236,7 @@ export function verifyArtifactV2Html(html, options = undefined) {
     }
 
     verifyResources(document, issues, mode, { strictOffline: true });
+    verifyEventHandlerAttributes(document, issues);
     const data = verifyData(
       document,
       html,
