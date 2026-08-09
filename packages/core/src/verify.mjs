@@ -3,6 +3,7 @@ import { ArtifactBuildError } from "./errors.mjs";
 import { readUtf8File } from "./io.mjs";
 import { failVerification, issue } from "./verify-common.mjs";
 import { verifyArtifactV1Html } from "./verify-v1.mjs";
+import { verifyArtifactV2Html } from "./verify-v2.mjs";
 
 export function verifyArtifactHtml(html, options = undefined) {
   if (typeof html !== "string") {
@@ -10,6 +11,7 @@ export function verifyArtifactHtml(html, options = undefined) {
   }
   const contract = detectArtifactContract(html);
   if (contract.version === 1) return verifyArtifactV1Html(html, options);
+  if (contract.version === 2) return verifyArtifactV2Html(html, options);
   throw new ArtifactBuildError(
     "UNSUPPORTED_ARTIFACT_CONTRACT",
     "Artifact verification is not implemented for this contract version",

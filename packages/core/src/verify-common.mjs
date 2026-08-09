@@ -59,7 +59,8 @@ const FORBIDDEN_SVG_ELEMENTS = new Set([
   "video",
 ]);
 
-const STARTUP_PROGRAM = `
+function startupProgram({ modeMetaName, globalName, rootSelector, lockGlobal }) {
+  return `
 import fs from "node:fs";
 import jsdom from ${JSON.stringify(jsdomEntryUrl)};
 const { JSDOM, VirtualConsole } = jsdom;
@@ -93,14 +94,14 @@ try {
     },
   });
   const mode = dom.window.document
-    .querySelector('meta[name="402v-artifact-mode"]')
+    .querySelector(${JSON.stringify(`meta[name="${modeMetaName}"]`)})
     ?.getAttribute("content");
   if (mode === "interactive") {
-    const descriptor = Object.getOwnPropertyDescriptor(dom.window, "__402vArtifact");
+    const descriptor = Object.getOwnPropertyDescriptor(dom.window, ${JSON.stringify(globalName)});
     const api = descriptor?.value;
     if (
-      descriptor?.configurable !== false ||
-      descriptor?.writable !== false ||
+      (${JSON.stringify(lockGlobal)} && descriptor?.configurable !== false) ||
+      (${JSON.stringify(lockGlobal)} && descriptor?.writable !== false) ||
       api === null ||
       typeof api !== "object" ||
       !Object.isFrozen(api) ||
@@ -123,7 +124,7 @@ try {
           (node) => JSON.stringify(api.getData(node.id)) === JSON.stringify(JSON.parse(node.textContent)),
         );
         if (
-          api.root !== dom.window.document.querySelector("[data-artifact-root]") ||
+          api.root !== dom.window.document.querySelector(${JSON.stringify(rootSelector)}) ||
           !idsMatch ||
           !dataMatch
         ) {
@@ -141,6 +142,7 @@ try {
 }
 process.stdout.write(JSON.stringify({ errors }));
 `;
+}
 
 export function issue(code, message, details = undefined) {
   return details === undefined ? { code, message } : { code, message, details };
@@ -288,11 +290,11 @@ export function hasClassicScriptType(script) {
   return normalized === "" || LEGACY_JAVASCRIPT_MIME_TYPES.has(normalized);
 }
 
-export function verifyResources(document, issues, mode) {
+export function verifyResources(document, issues, mode, options = undefined) {
   for (const script of document.querySelectorAll("script[src]")) {
     issues.push(issue("EXTERNAL_RESOURCE", "Artifact scripts must be inline"));
   }
-  if (mode === "note") return;
+  if (mode === "note" && options?.strictOffline !== true) return;
   for (const link of document.querySelectorAll("link[href]")) {
     issues.push(issue("EXTERNAL_RESOURCE", "Artifact link resources are unresolved"));
   }
@@ -346,7 +348,15 @@ export function verifyResources(document, issues, mode) {
   }
 }
 
-export function verifyData(document, rawHtml, nodeLocation, required, mode, issues) {
+export function verifyData(
+  document,
+  rawHtml,
+  nodeLocation,
+  required,
+  mode,
+  issues,
+  options = undefined,
+) {
   const blocks = new Map();
   const nodes = [];
   const seenIds = new Set();
@@ -414,30 +424,36 @@ export function verifyData(document, rawHtml, nodeLocation, required, mode, issu
     }
   }
 
+  const hashMetaName = options?.hashMetaName ?? "html-kit-source-hash";
+  const hashRequired = mode === "interactive" || options?.hashInNote === true;
   let sourceHash;
-  if (mode === "interactive" && blocks.size > 0) {
+  if (hashRequired && blocks.size > 0) {
     try {
       sourceHash = computeSourceHash(blocks);
     } catch {
       issues.push(issue("INVALID_DATA_BLOCK", "JSON data blocks cannot be hashed canonically"));
     }
-  } else if (mode === "interactive") {
+  } else if (hashRequired) {
     sourceHash = computeSourceHash(new Map());
   }
-  const hashMetas = findMetaElements(document, "402v-source-hash");
+  const hashMetas = findMetaElements(document, hashMetaName);
   if (
-    mode === "interactive" &&
+    hashRequired &&
     (hashMetas.length !== 1 || hashMetas[0].getAttribute("content") !== sourceHash)
   ) {
     issues.push(issue("SOURCE_HASH_MISMATCH", "Embedded source hash does not match canonical data"));
   }
-  if (mode === "note" && (nodes.length > 0 || hashMetas.length > 0)) {
+  if (
+    mode === "note" &&
+    options?.allowDataInNote !== true &&
+    (nodes.length > 0 || hashMetas.length > 0)
+  ) {
     issues.push(issue("INVALID_MODE", "Note artifacts must not contain interactive data declarations"));
   }
   return { blocks, nodes, sourceHash };
 }
 
-export function verifySvg(document, issues) {
+export function verifySvg(document, issues, options = undefined) {
   for (const svg of document.querySelectorAll("svg")) {
     if (!(svg.getAttribute("viewBox") ?? "").trim()) {
       issues.push(issue("SVG_MISSING_VIEWBOX", "SVG requires a non-empty viewBox"));
@@ -455,7 +471,10 @@ export function verifySvg(document, issues) {
     ) {
       issues.push(issue("SVG_INACCESSIBLE", "SVG requires local labelled title accessibility metadata"));
     }
-    if (!svg.parentElement?.classList.contains("artifact-svg-frame")) {
+    if (
+      options?.requireFrame !== false &&
+      !svg.parentElement?.classList.contains("artifact-svg-frame")
+    ) {
       issues.push(issue("SVG_MISSING_FRAME", "SVG requires an artifact SVG scroll frame"));
     }
 
@@ -540,11 +559,30 @@ export function verifyArtifactStartup(html, options = undefined) {
   if (typeof html !== "string") {
     failVerification([issue("INVALID_HTML_INPUT", "Artifact HTML must be a string")]);
   }
-  const inspected = inspectOptions(options, new Set(["timeoutMs"]));
+  const inspected = inspectOptions(
+    options,
+    new Set(["timeoutMs", "modeMetaName", "globalName", "rootSelector", "lockGlobal"]),
+  );
   const timeoutMs = startupTimeout(inspected.timeoutMs);
+  const runtime = {
+    modeMetaName: inspected.modeMetaName,
+    globalName: inspected.globalName,
+    rootSelector: inspected.rootSelector,
+    lockGlobal: inspected.lockGlobal,
+  };
+  if (
+    typeof runtime.modeMetaName !== "string" ||
+    typeof runtime.globalName !== "string" ||
+    typeof runtime.rootSelector !== "string" ||
+    typeof runtime.lockGlobal !== "boolean"
+  ) {
+    failVerification([
+      issue("INVALID_VERIFICATION_OPTIONS", "Startup runtime options are invalid"),
+    ]);
+  }
   const result = spawnSync(
     process.execPath,
-    ["--input-type=module", "--eval", STARTUP_PROGRAM],
+    ["--input-type=module", "--eval", startupProgram(runtime)],
     {
       encoding: "utf8",
       input: html,

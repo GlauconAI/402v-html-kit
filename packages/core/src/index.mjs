@@ -8,4 +8,5 @@ export {
 } from "./data-blocks.mjs";
 export { ARTIFACT_RESOURCE_LIMITS } from "./resource-limits.mjs";
 export { detectArtifactContract } from "./contracts.mjs";
+export { assembleArtifactV2 } from "./document-v2.mjs";
 export { verifyArtifactHtml } from "./verify.mjs";

@@ -170,6 +170,7 @@ export function verifyArtifactV1Html(html, options = undefined) {
       required,
       mode,
       issues,
+      { hashMetaName: "402v-source-hash" },
     );
     verifyScripts(document, data.nodes, mode, issues);
     if (mode === "interactive") verifySvg(document, issues);
@@ -182,7 +183,13 @@ export function verifyArtifactV1Html(html, options = undefined) {
 
     if (issues.length === 0 && mode === "interactive") {
       try {
-        verifyArtifactStartup(html, { timeoutMs });
+        verifyArtifactStartup(html, {
+          timeoutMs,
+          modeMetaName: "402v-artifact-mode",
+          globalName: "__402vArtifact",
+          rootSelector: "[data-artifact-root]",
+          lockGlobal: true,
+        });
       } catch (cause) {
         if (cause instanceof ArtifactBuildError) {
           const startupIssues = cause.details?.issues;
