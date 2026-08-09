@@ -16,6 +16,7 @@ import {
   stableJson,
 } from "./data-blocks.mjs";
 import { ArtifactBuildError } from "./errors.mjs";
+import { findMetaElements } from "./meta.mjs";
 
 const require = createRequire(import.meta.url);
 const jsdomEntryUrl = pathToFileURL(require.resolve("jsdom")).href;
@@ -229,14 +230,8 @@ export function requiredDataBlocks(value) {
   return result;
 }
 
-export function metas(document, name) {
-  return [...document.querySelectorAll("meta[name]")].filter(
-    (element) => element.getAttribute("name")?.toLowerCase() === name,
-  );
-}
-
 export function addUniqueMetaIssue(issues, document, name, expected, code, label) {
-  const matches = metas(document, name);
+  const matches = findMetaElements(document, name);
   if (matches.length !== 1 || matches[0].getAttribute("content") !== expected) {
     issues.push(issue(code, `Artifact requires exactly one valid ${label}`));
   }
@@ -429,7 +424,7 @@ export function verifyData(document, rawHtml, nodeLocation, required, mode, issu
   } else if (mode === "interactive") {
     sourceHash = computeSourceHash(new Map());
   }
-  const hashMetas = metas(document, "402v-source-hash");
+  const hashMetas = findMetaElements(document, "402v-source-hash");
   if (
     mode === "interactive" &&
     (hashMetas.length !== 1 || hashMetas[0].getAttribute("content") !== sourceHash)

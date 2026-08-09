@@ -1,13 +1,11 @@
-import { detectArtifactContract } from "./contracts.mjs";
 import { ArtifactBuildError } from "./errors.mjs";
-import { readUtf8File } from "./io.mjs";
+import { findMetaElements } from "./meta.mjs";
 import {
   addUniqueMetaIssue,
   failVerification,
   hasClassicScriptType,
   inspectOptions,
   issue,
-  metas,
   parseArtifactHtml,
   requiredDataBlocks,
   startupTimeout,
@@ -124,7 +122,7 @@ function hasOverflowGuards(document) {
   );
 }
 
-function verifyArtifactV1Html(html, options) {
+export function verifyArtifactV1Html(html, options = undefined) {
   if (typeof html !== "string") {
     failVerification([issue("INVALID_HTML_INPUT", "Artifact HTML must be a string")]);
   }
@@ -152,7 +150,7 @@ function verifyArtifactV1Html(html, options) {
     addUniqueMetaIssue(issues, document, "viewport", VIEWPORT, "INVALID_VIEWPORT", "viewport metadata");
     addUniqueMetaIssue(issues, document, "generator", GENERATOR, "INVALID_GENERATOR", "generator metadata");
 
-    const modeMetas = metas(document, "402v-artifact-mode");
+    const modeMetas = findMetaElements(document, "402v-artifact-mode");
     let mode;
     if (modeMetas.length === 1 && modeMetas[0].getAttribute("content") === "interactive") {
       mode = "interactive";
@@ -207,34 +205,4 @@ function verifyArtifactV1Html(html, options) {
   } finally {
     dom.window.close();
   }
-}
-
-export function verifyArtifactHtml(html, options = undefined) {
-  const contract = detectArtifactContract(html);
-  if (contract.version === 1) return verifyArtifactV1Html(html, options);
-  throw new ArtifactBuildError(
-    "UNSUPPORTED_ARTIFACT_CONTRACT",
-    "Artifact verification is not implemented for this contract version",
-    { version: contract.version },
-  );
-}
-
-export function verifyArtifactFile(path, options = undefined) {
-  let loaded;
-  try {
-    loaded = readUtf8File(path);
-  } catch (cause) {
-    if (cause instanceof ArtifactBuildError) {
-      failVerification([
-        issue(
-          cause.message.includes("valid UTF-8") ? "INVALID_UTF8" : "ARTIFACT_READ_FAILED",
-          cause.message.includes("valid UTF-8")
-            ? "Artifact file must contain strict UTF-8"
-            : "Artifact file could not be read safely",
-        ),
-      ]);
-    }
-    throw cause;
-  }
-  return verifyArtifactHtml(loaded.content, options);
 }
