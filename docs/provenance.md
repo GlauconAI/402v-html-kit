@@ -1,11 +1,11 @@
 # Contract v1 compatibility provenance
 
 The frozen contract-v1 fixtures and copied primitives in this repository come
-from the reviewed `glaucon-politeia` source repository:
+from the canonical `glaucon-politeia` source:
 
-- repository: `/Users/glaucon/.openclaw/workspace/plato/projects/glaucon-politeia`
-- reviewed worktree: `/Users/glaucon/.openclaw/workspace/plato/projects/glaucon-politeia/.worktrees/html-kit-open-source-design`
+- repository: <https://github.com/GlauconAI/glaucon-politeia>
 - source commit: `9527b4fd8c3ff3c49180516440f715a6d1798c8f` (`9527b4f`)
+- commit permalink: <https://github.com/GlauconAI/glaucon-politeia/commit/9527b4fd8c3ff3c49180516440f715a6d1798c8f>
 
 The copied `assets.d.mts` declaration has a type-only import from
 `contracts.mjs`. Therefore `packages/core/src/contracts.d.mts` is also copied
@@ -19,11 +19,19 @@ source has no declaration for every internal JavaScript primitive. Typecheck
 therefore validates the copied `.d.mts` public declarations and TypeScript
 tests without rewriting or suppressing errors inside the frozen JavaScript.
 
-Fixture generation ran from a temporary archive of that exact commit. With the
-archive root as the working directory and its dependencies available, the
-exact commands were:
+The recorded fixtures were generated and byte-parity verified with Node.js
+`v25.9.0` and npm `11.12.1`. These versions record the verified regeneration
+environment; they do not claim broader runtime compatibility.
+
+For a fresh portable regeneration, clone the canonical repository, detach at
+the reviewed commit, and install exactly from its committed lockfile before
+running the unchanged CLI:
 
 ```sh
+git clone https://github.com/GlauconAI/glaucon-politeia.git
+cd glaucon-politeia
+git checkout --detach 9527b4fd8c3ff3c49180516440f715a6d1798c8f
+npm ci
 mkdir -p .generated
 node scripts/html-note-kit.mjs init .generated/note --title "Contract v1 Compatibility Note"
 node scripts/html-note-kit.mjs build .generated/note/note.md --output .generated/note.html
