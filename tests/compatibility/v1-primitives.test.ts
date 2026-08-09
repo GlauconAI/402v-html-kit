@@ -28,5 +28,6 @@ describe("frozen contract-v1 primitives", () => {
     const html = interactive.toString("utf8");
 
     expect([...extractDataBlocks(html).keys()]).toEqual(["project-registry"]);
+    expect(Buffer.from(html, "utf8")).toEqual(interactive);
   });
 });
