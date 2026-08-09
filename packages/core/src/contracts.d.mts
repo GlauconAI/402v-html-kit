@@ -54,6 +54,16 @@ export interface ArtifactManifest {
   requiredDataBlocks: string[];
 }
 
+export interface ArtifactContract {
+  version: 1 | 2;
+  mode: "note" | "interactive";
+}
+
+export interface VerifyArtifactHtmlOptions {
+  requiredDataBlocks?: string[];
+  startupTimeoutMs?: number;
+}
+
 export interface VerificationIssue {
   code: string;
   message: string;
@@ -62,7 +72,8 @@ export interface VerificationIssue {
 
 export interface ArtifactVerificationResult {
   ok: true;
-  mode: "interactive" | "note" | "unknown";
+  contractVersion: 1 | 2;
+  mode: "interactive" | "note";
   sourceHash: string | undefined;
   dataBlockIds: string[];
   issues: VerificationIssue[];
@@ -93,3 +104,5 @@ export interface NoteBuildResult {
   outputHash: string;
   dataBlockIds: string[];
 }
+
+export declare function detectArtifactContract(html: string): ArtifactContract;
