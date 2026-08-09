@@ -1,0 +1,780 @@
+<!doctype html>
+<html lang="en" style="max-width: 100% !important; overflow-x: clip !important;">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A generic offline fixture for canonical data and local interactions.">
+  <meta name="generator" content="402v HTML Note Kit">
+  <meta name="402v-artifact-mode" content="interactive">
+  <meta name="402v-source-hash" content="sha256:856e8776a21c9cefd873947f315f2d519046914bc83c4f90302b2053ac46d8ea">
+  <title>Interactive Project Index</title>
+  <style>
+    :root {
+      --note-bg: #0d0e10;
+      --note-panel: #15171b;
+      --note-panel-muted: #1d2026;
+      --note-panel-soft: #111318;
+      --note-border: #2c3038;
+      --note-border-strong: #4e5664;
+      --note-text: #e8eaed;
+      --note-muted: #969da9;
+      --note-strong: #ffffff;
+      --note-accent: #7c3aed;
+      --note-accent-strong: #a78bfa;
+      --note-accent-soft: #211a34;
+      --note-success: #43d38b;
+      --note-warning: #f2b84b;
+      --note-danger: #fb7185;
+      --note-shadow: 0 20px 60px rgba(0, 0, 0, 0.24);
+      --note-mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", ui-monospace, monospace;
+      --note-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color-scheme: dark;
+      font-family: var(--note-sans);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        linear-gradient(#191b20 1px, transparent 1px),
+        linear-gradient(90deg, #191b20 1px, transparent 1px),
+        radial-gradient(circle at 20% -10%, rgba(124, 58, 237, 0.11), transparent 34rem),
+        var(--note-bg);
+      background-size: 44px 44px, 44px 44px, auto, auto;
+      color: var(--note-text);
+      line-height: 1.68;
+      text-rendering: optimizeLegibility;
+    }
+
+    a { color: var(--note-accent-strong); text-underline-offset: 0.18em; }
+    a:hover { color: var(--note-strong); }
+    a:focus-visible {
+      border-radius: 4px;
+      outline: 3px solid rgba(124, 58, 237, 0.4);
+      outline-offset: 3px;
+    }
+
+    .artifact-topbar {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(13, 14, 16, 0.88);
+      backdrop-filter: blur(16px);
+    }
+    .artifact-topbar-inner {
+      display: grid;
+      width: min(1200px, calc(100% - 32px));
+      min-height: 64px;
+      margin: 0 auto;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      font-family: var(--note-mono);
+    }
+    .artifact-brand {
+      color: var(--note-strong);
+      font-size: 18px;
+      font-weight: 750;
+      text-decoration: none;
+    }
+    .artifact-path {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--note-success);
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .artifact-topbar-status,
+    .artifact-status span,
+    .artifact-meta dt {
+      width: fit-content;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.035);
+      color: var(--note-muted);
+      padding: 4px 9px;
+      font-family: var(--note-mono);
+      font-size: 11px;
+    }
+    .artifact-topbar-status {
+      border-color: rgba(67, 211, 139, 0.4);
+      color: var(--note-success);
+    }
+
+    .artifact-shell {
+      width: min(1200px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 34px 0 72px;
+    }
+    .artifact-hero,
+    .artifact-main-panel,
+    .artifact-rail-panel {
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 8px;
+      background: rgba(18, 20, 25, 0.9);
+      box-shadow: var(--note-shadow);
+    }
+    .artifact-hero {
+      min-height: 300px;
+      padding: 24px;
+    }
+    .note-eyebrow {
+      margin: 0 0 18px;
+      color: var(--note-accent-strong);
+      font-family: var(--note-mono);
+      font-size: 0.74rem;
+      font-weight: 800;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+    .artifact-hero h1 {
+      max-width: 18ch;
+      margin: 0;
+      color: var(--note-strong);
+      font-family: var(--note-mono);
+      font-size: clamp(2.2rem, 6vw, 3.5rem);
+      font-weight: 650;
+      letter-spacing: -0.045em;
+      line-height: 1.03;
+    }
+    .note-description {
+      max-width: 68ch;
+      margin: 24px 0 0;
+      color: var(--note-text);
+      font-family: var(--note-mono);
+      font-size: clamp(1rem, 2vw, 1.18rem);
+      line-height: 1.5;
+    }
+    .artifact-status {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 32px;
+    }
+    .artifact-status span:first-child {
+      border-color: rgba(67, 211, 139, 0.4);
+      color: var(--note-success);
+    }
+
+    .artifact-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(240px, 280px);
+      gap: 10px;
+      margin-top: 10px;
+      align-items: start;
+    }
+    .artifact-main-panel {
+      min-width: 0;
+      padding: 28px;
+    }
+    .artifact-rail {
+      position: sticky;
+      top: 74px;
+      display: grid;
+      gap: 10px;
+    }
+    .artifact-rail-panel { padding: 16px; }
+
+    .note-article > h1:first-child { display: none; }
+    .note-article h2,
+    .note-article h3 {
+      color: var(--note-strong);
+      scroll-margin-top: 84px;
+      line-height: 1.2;
+    }
+    .note-article h2 {
+      margin: 54px 0 18px;
+      padding-top: 18px;
+      border-top: 1px solid var(--note-border);
+      font-size: clamp(1.55rem, 4vw, 2rem);
+      font-weight: 750;
+      letter-spacing: -0.025em;
+    }
+    .note-article h3 { margin: 34px 0 13px; font-size: 1.22rem; }
+    .note-article p { margin: 0 0 1.2em; }
+    .note-article strong { color: var(--note-strong); }
+    .note-article ul,
+    .note-article ol { margin: 0 0 1.4em; padding-left: 1.4em; }
+    .note-article li { margin: 0.42em 0; padding-left: 0.2em; }
+    .note-article li::marker { color: var(--note-accent-strong); }
+    .note-article .contains-task-list { padding-left: 0; list-style: none; }
+    .note-article .task-list-item { display: flex; gap: 10px; align-items: baseline; }
+    .note-article input[type="checkbox"] { accent-color: var(--note-success); }
+
+    .note-article blockquote {
+      margin: 26px 0;
+      border: 1px solid var(--note-border);
+      border-left: 3px solid var(--note-accent);
+      border-radius: 8px;
+      background: var(--note-panel-soft);
+      padding: 16px 18px;
+      color: var(--note-muted);
+    }
+    .note-article blockquote p:last-child { margin-bottom: 0; }
+    .note-article .callout::before {
+      content: attr(data-callout-label);
+      display: block;
+      margin-bottom: 5px;
+      color: var(--note-accent-strong);
+      font-family: var(--note-mono);
+      font-size: 0.68rem;
+      font-weight: 850;
+      letter-spacing: 0.1em;
+    }
+    .note-article .callout-warning,
+    .note-article .callout-caution { border-left-color: var(--note-warning); }
+    .note-article .callout-warning::before,
+    .note-article .callout-caution::before { color: var(--note-warning); }
+
+    .note-article table {
+      width: 100%;
+      margin: 26px 0;
+      border-collapse: collapse;
+      border: 1px solid var(--note-border);
+      background: var(--note-panel-soft);
+      font-size: 0.92rem;
+    }
+    .note-article th,
+    .note-article td {
+      border-bottom: 1px solid var(--note-border);
+      padding: 11px 13px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .note-article th {
+      background: var(--note-panel-muted);
+      color: var(--note-strong);
+      font-family: var(--note-mono);
+      font-weight: 700;
+    }
+    .note-article tr:last-child td { border-bottom: 0; }
+
+    .note-article pre {
+      margin: 26px 0;
+      overflow-x: auto;
+      border: 1px solid var(--note-border);
+      border-radius: 8px;
+      background: #0b0c0e;
+      color: var(--note-text);
+      padding: 17px 18px;
+      font-size: 0.86rem;
+      line-height: 1.62;
+    }
+    .note-article code {
+      border-radius: 5px;
+      background: var(--note-panel-muted);
+      color: var(--note-accent-strong);
+      padding: 0.16em 0.38em;
+      font-family: var(--note-mono);
+      font-size: 0.88em;
+    }
+    .note-article pre code { background: transparent; color: inherit; padding: 0; font-size: inherit; }
+
+    .note-article img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      margin: 26px auto;
+      border: 1px solid var(--note-border);
+      border-radius: 8px;
+      background: var(--note-panel);
+    }
+
+    .flow-diagram {
+      margin: 28px 0;
+      overflow-x: auto;
+      border: 1px solid var(--note-border);
+      border-radius: 8px;
+      background: var(--note-panel-soft);
+      padding: 16px;
+    }
+    .flow-diagram svg { display: block; width: 100%; min-width: 580px; height: auto; }
+    .flow-edge path { fill: none; stroke: var(--note-border-strong); stroke-width: 2; }
+    #flow-arrow path { fill: var(--note-border-strong); }
+    .flow-edge-label {
+      fill: var(--note-muted);
+      font-family: var(--note-mono);
+      font-size: 11px;
+      paint-order: stroke;
+      stroke: var(--note-panel-soft);
+      stroke-width: 5px;
+    }
+    .flow-node rect,
+    .flow-node > path { fill: var(--note-panel-muted); stroke: var(--note-border-strong); stroke-width: 1.5; }
+    .flow-node-decision > path { fill: var(--note-accent-soft); stroke: var(--note-accent); }
+    .flow-node text { fill: var(--note-strong); font-family: var(--note-mono); font-size: 13px; font-weight: 700; }
+
+    .note-toc strong,
+    .artifact-meta h2 {
+      display: block;
+      margin: 0;
+      color: var(--note-strong);
+      font-family: var(--note-mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+    .note-toc ol { margin: 14px 0 0; padding: 0; list-style: none; }
+    .note-toc li { margin: 7px 0; }
+    .note-toc .toc-level-3 { padding-left: 12px; }
+    .note-toc a { color: var(--note-muted); text-decoration: none; font-size: 0.83rem; }
+    .note-toc a:hover { color: var(--note-accent-strong); }
+
+    .artifact-meta dl { display: grid; gap: 10px; margin: 14px 0 0; }
+    .artifact-meta div { min-width: 0; }
+    .artifact-meta dt { padding: 3px 7px; }
+    .artifact-meta dd {
+      margin: 5px 0 0;
+      overflow-wrap: anywhere;
+      color: var(--note-text);
+      font-family: var(--note-mono);
+      font-size: 0.78rem;
+    }
+    .note-footer {
+      margin-top: 64px;
+      border-top: 1px solid var(--note-border);
+      padding-top: 16px;
+      color: var(--note-muted);
+      font-family: var(--note-mono);
+      font-size: 0.75rem;
+    }
+
+    @media (max-width: 900px) {
+      .artifact-layout { grid-template-columns: minmax(0, 1fr); }
+      .artifact-rail { position: static; grid-row: 1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .artifact-hero { min-height: 260px; }
+    }
+    @media (max-width: 640px) {
+      .artifact-topbar-inner,
+      .artifact-shell { width: calc(100% - 20px); }
+      .artifact-topbar-inner { grid-template-columns: auto minmax(0, 1fr); }
+      .artifact-topbar-status { display: none; }
+      .artifact-shell { padding: 20px 0 48px; }
+      .artifact-hero,
+      .artifact-main-panel,
+      .artifact-rail-panel { padding: 14px; }
+      .artifact-hero h1 { font-size: 2rem; }
+      .artifact-rail { grid-template-columns: minmax(0, 1fr); }
+      .note-toc { display: none; }
+      .note-article table { display: block; overflow-x: auto; }
+      .flow-diagram { padding: 10px; }
+    }
+    @media print {
+      :root {
+        --note-bg: #ffffff;
+        --note-panel: #ffffff;
+        --note-panel-muted: #f3f4f6;
+        --note-panel-soft: #ffffff;
+        --note-border: #d1d5db;
+        --note-border-strong: #9ca3af;
+        --note-text: #202124;
+        --note-muted: #5f6368;
+        --note-strong: #000000;
+      }
+      body { background: white; }
+      .artifact-topbar,
+      .artifact-rail { display: none; }
+      .artifact-shell { width: 100%; padding: 0; }
+      .artifact-hero,
+      .artifact-main-panel { border: 0; box-shadow: none; padding-inline: 0; }
+      .artifact-layout { display: block; }
+      .note-article h2 { break-after: avoid; }
+      .note-article pre,
+      .flow-diagram,
+      .note-article table { break-inside: avoid; }
+    }
+    html,
+    body {
+      max-width: 100%;
+      overflow-x: clip;
+    }
+    [data-artifact-root],
+    .artifact-topbar-inner,
+    .artifact-shell,
+    .artifact-layout,
+    .artifact-main-panel,
+    .artifact-rail {
+      min-width: 0;
+      max-width: 100%;
+    }
+    .artifact-topbar-inner {
+      grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto;
+    }
+    .artifact-navigation-slot {
+      min-width: 0;
+      max-width: 100%;
+    }
+    .artifact-navigation-slot:empty { display: none; }
+    .artifact-topbar-status { grid-column: 4; }
+    .artifact-svg-frame {
+      max-width: 100%;
+      overflow-x: auto;
+    }
+    .artifact-svg-frame > .artifact-svg {
+      display: block;
+      height: auto;
+    }
+    @media (max-width: 640px) {
+      .artifact-topbar-inner {
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+      .artifact-navigation-slot { grid-column: 1 / -1; }
+    }
+  </style>
+  <style data-artifact-style="artifact.css">
+.fixture-navigation {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  border: 1px solid var(--note-border);
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  font-family: var(--note-mono);
+  font-size: 0.75rem;
+  text-decoration: none;
+}
+
+.fixture-summary {
+  max-width: 56ch;
+  margin: 1.5rem 0 0;
+  color: var(--note-muted);
+}
+
+.fixture-summary strong {
+  color: var(--note-success);
+  font-family: var(--note-mono);
+}
+
+.fixture-projects,
+.fixture-section-heading,
+.fixture-project-grid,
+.fixture-project-card,
+.fixture-system-map,
+.artifact-svg-frame {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fixture-section-heading {
+  display: flex;
+  gap: 1rem;
+  align-items: end;
+  justify-content: space-between;
+}
+
+.fixture-section-heading h2,
+.fixture-system-map h2 {
+  margin: 0;
+  color: var(--note-strong);
+  font-family: var(--note-mono);
+}
+
+.fixture-kicker,
+.fixture-project-category,
+.fixture-count,
+.fixture-search-label {
+  color: var(--note-muted);
+  font-family: var(--note-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.fixture-kicker,
+.fixture-project-category {
+  margin: 0 0 0.35rem;
+}
+
+.fixture-count {
+  margin: 0;
+}
+
+.fixture-count span {
+  color: var(--note-success);
+}
+
+.fixture-search-label {
+  display: block;
+  margin-top: 1.5rem;
+}
+
+.fixture-search {
+  width: 100%;
+  max-width: 100%;
+  margin-top: 0.45rem;
+  border: 1px solid var(--note-border-strong);
+  border-radius: 6px;
+  background: var(--note-panel-soft);
+  color: var(--note-text);
+  padding: 0.75rem 0.85rem;
+  font: inherit;
+}
+
+.fixture-search:focus-visible {
+  outline: 3px solid rgba(124, 58, 237, 0.4);
+  outline-offset: 2px;
+}
+
+.fixture-project-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.fixture-project-card {
+  border: 1px solid var(--note-border);
+  border-radius: 8px;
+  background: var(--note-panel-muted);
+  padding: 1rem;
+}
+
+.fixture-project-card[hidden] {
+  display: none;
+}
+
+.fixture-project-card h3 {
+  margin: 0;
+  color: var(--note-strong);
+  overflow-wrap: anywhere;
+}
+
+.fixture-project-card > p:last-child {
+  margin: 0.6rem 0 0;
+  color: var(--note-muted);
+  overflow-wrap: anywhere;
+}
+
+.fixture-system-map {
+  overflow: hidden;
+}
+
+.fixture-system-map .artifact-svg-frame {
+  margin-top: 0.75rem;
+  border: 1px solid var(--note-border);
+  border-radius: 6px;
+  background: var(--note-panel-soft);
+}
+
+.fixture-system-map .artifact-svg {
+  width: 900px;
+  min-width: 900px;
+  height: auto;
+}
+
+.fixture-footer {
+  margin: 0 0 0.75rem;
+  color: var(--note-muted);
+  font-family: var(--note-mono);
+  font-size: 0.75rem;
+}
+
+@media (max-width: 640px) {
+  .fixture-section-heading {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .fixture-project-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+  </style>
+</head>
+<body style="max-width: 100% !important; overflow-x: clip !important;">
+  <div data-artifact-root style="min-width: 0 !important; max-width: 100% !important;">
+    <header class="artifact-topbar">
+      <div class="artifact-topbar-inner" style="min-width: 0 !important; max-width: 100% !important;">
+        <a class="artifact-brand" href="https://402v.com">402v</a>
+        <span class="artifact-path">~/sites/interactive-project-index</span>
+        <div class="artifact-navigation-slot"><a class="fixture-navigation" href="#projects">Projects</a></div>
+        <span class="artifact-topbar-status">artifact: standalone</span>
+      </div>
+    </header>
+    <div class="artifact-shell" style="min-width: 0 !important; max-width: 100% !important;">
+      <header class="artifact-hero">
+        <p class="note-eyebrow">402v Artifact Fixture</p>
+        <h1>Interactive Project Index</h1>
+        <p class="note-description">&gt; A generic offline fixture for canonical data and local interactions.</p>
+        <div class="artifact-status" aria-label="Artifact status">
+          <span>status: ready</span>
+          <span>target: 402v</span>
+          <span>runtime: offline</span>
+        </div>
+        
+      <p class="fixture-summary">
+        <strong>3</strong> projects rendered from one canonical JSON block.
+      </p>
+      </header>
+      <div class="artifact-layout" style="min-width: 0 !important; max-width: 100% !important;">
+        <main class="artifact-main-panel" style="min-width: 0 !important; max-width: 100% !important;">
+          
+      <section id="projects" class="fixture-projects" aria-labelledby="projects-heading">
+        <div class="fixture-section-heading">
+          <div>
+            <p class="fixture-kicker">Local registry</p>
+            <h2 id="projects-heading">Projects</h2>
+          </div>
+          <p class="fixture-count"><span id="visible-count" aria-live="polite" aria-atomic="true">3</span> visible</p>
+        </div>
+        <label class="fixture-search-label" for="project-search">Filter projects</label>
+        <input
+          id="project-search"
+          class="fixture-search"
+          type="search"
+          placeholder="Try memory"
+          autocomplete="off"
+        >
+        <div class="fixture-project-grid">
+        <article
+          class="fixture-project-card"
+          data-project-card
+          data-project-index="0"
+          data-project-name="Agent Atlas"
+        >
+          <p class="fixture-project-category">Coordination</p>
+          <h3>Agent Atlas</h3>
+          <p>Maps local agents and the boundaries between their responsibilities.</p>
+        </article>
+        <article
+          class="fixture-project-card"
+          data-project-card
+          data-project-index="1"
+          data-project-name="Memory Loom"
+        >
+          <p class="fixture-project-category">Knowledge</p>
+          <h3>Memory Loom</h3>
+          <p>Weaves durable notes into a searchable local knowledge fabric.</p>
+        </article>
+        <article
+          class="fixture-project-card"
+          data-project-card
+          data-project-index="2"
+          data-project-name="Local Observer"
+        >
+          <p class="fixture-project-category">Diagnostics</p>
+          <h3>Local Observer</h3>
+          <p>Summarizes system signals without requiring a network connection.</p>
+        </article>
+        </div>
+      </section>
+          <footer class="note-footer"><p class="fixture-footer">Generic interactive fixture · canonical data, local assets, offline runtime.</p>402v HTML Note Kit · standalone HTML</footer>
+        </main>
+        <aside class="artifact-rail" style="min-width: 0 !important; max-width: 100% !important;" aria-label="Artifact information">
+          
+      <section class="artifact-rail-panel fixture-system-map" aria-labelledby="system-map-heading">
+        <p class="fixture-kicker">Prepared SVG</p>
+        <h2 id="system-map-heading">Artifact pipeline</h2>
+        <div class="artifact-svg-frame" style="max-width: 100% !important; overflow-x: auto !important;" data-svg-id="system-map"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 260" width="900" height="260" aria-labelledby="system-map-title system-map-description" role="img" class="artifact-svg"><title id="system-map-title">Artifact compilation pipeline</title><desc id="system-map-description">Canonical JSON flows through renderer slots into offline HTML.</desc>
+  <rect x="20" y="84" width="220" height="92" rx="12" fill="#1d2026" stroke="#7c3aed" stroke-width="3"></rect>
+  <rect x="340" y="84" width="220" height="92" rx="12" fill="#1d2026" stroke="#43d38b" stroke-width="3"></rect>
+  <rect x="660" y="84" width="220" height="92" rx="12" fill="#1d2026" stroke="#f2b84b" stroke-width="3"></rect>
+  <path d="M240 130H340M560 130H660" fill="none" stroke="#969da9" stroke-width="4"></path>
+  <circle cx="290" cy="130" r="7" fill="#a78bfa"></circle>
+  <circle cx="610" cy="130" r="7" fill="#a78bfa"></circle>
+  <text x="130" y="124" fill="#ffffff" font-family="ui-monospace, monospace" font-size="20" text-anchor="middle">Canonical JSON</text>
+  <text x="130" y="150" fill="#969da9" font-family="ui-monospace, monospace" font-size="13" text-anchor="middle">addressable data</text>
+  <text x="450" y="124" fill="#ffffff" font-family="ui-monospace, monospace" font-size="20" text-anchor="middle">Renderer Slots</text>
+  <text x="450" y="150" fill="#969da9" font-family="ui-monospace, monospace" font-size="13" text-anchor="middle">trusted views</text>
+  <text x="770" y="124" fill="#ffffff" font-family="ui-monospace, monospace" font-size="20" text-anchor="middle">Offline HTML</text>
+  <text x="770" y="150" fill="#969da9" font-family="ui-monospace, monospace" font-size="13" text-anchor="middle">standalone file</text>
+</svg></div>
+      </section>
+          <section class="artifact-rail-panel artifact-meta">
+            <h2>Artifact</h2>
+            <dl>
+              <div><dt>format</dt><dd>HTML</dd></div>
+              <div><dt>layout</dt><dd>402v / interactive</dd></div>
+              <div><dt>delivery</dt><dd>local · 402v</dd></div>
+            </dl>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </div>
+<script type="application/json" id="project-registry">
+{
+  "projects": [
+    {
+      "category": "Coordination",
+      "description": "Maps local agents and the boundaries between their responsibilities.",
+      "name": "Agent Atlas"
+    },
+    {
+      "category": "Knowledge",
+      "description": "Weaves durable notes into a searchable local knowledge fabric.",
+      "name": "Memory Loom"
+    },
+    {
+      "category": "Diagnostics",
+      "description": "Summarizes system signals without requiring a network connection.",
+      "name": "Local Observer"
+    }
+  ]
+}
+</script>
+<script data-402v-runtime>
+(function () {
+  "use strict";
+  const root = document.querySelector("[data-artifact-root]");
+  const dataNodes = new Map(Array.from(
+    document.querySelectorAll('script[type="application/json"][id]'),
+    (node) => [node.id, node],
+  ));
+  const ids = Object.freeze(Array.from(dataNodes.keys()));
+  const api = Object.freeze({
+    root,
+    dataIds: () => ids.slice(),
+    getData(id) {
+      if (!dataNodes.has(id)) {
+        throw new Error("Unknown artifact data block: " + String(id));
+      }
+      return JSON.parse(dataNodes.get(id).textContent);
+    },
+  });
+  Object.defineProperty(window, "__402vArtifact", {
+    value: api,
+    configurable: false,
+    writable: false,
+  });
+})();
+</script>
+<script data-artifact-script="artifact.js">
+(() => {
+  const registry = window.__402vArtifact.getData("project-registry");
+  const projects = Array.isArray(registry.projects) ? registry.projects : [];
+  const input = document.querySelector("#project-search");
+  const count = document.querySelector("#visible-count");
+  const cards = [...document.querySelectorAll("[data-project-card]")];
+
+  const update = () => {
+    const query = input.value.trim().toLowerCase();
+    let visible = 0;
+
+    for (const card of cards) {
+      const index = Number.parseInt(card.dataset.projectIndex, 10);
+      const project = projects[index];
+      const searchable = project
+        ? [project.name, project.category, project.description]
+            .join(" ")
+            .toLowerCase()
+        : "";
+      const matches = searchable.includes(query);
+      card.hidden = !matches;
+      if (matches) visible += 1;
+    }
+
+    count.textContent = String(visible);
+  };
+
+  input.addEventListener("input", update);
+  update();
+})();
+
+</script>
+</body>
+</html>
