@@ -20,13 +20,16 @@ describe("workspace package shape", () => {
     expect(cliManifest.name).toBe("@402v/html-kit-cli");
     expect(themeManifest.name).toBe("@402v/theme-402v");
     expect(cliManifest.bin).toEqual({ "402v-html-kit": "./src/cli.mjs" });
+    expect(rootManifest.engines).toEqual(
+      expect.objectContaining({ node: "^22.13.0 || >=24.0.0" }),
+    );
 
     for (const manifest of [coreManifest, cliManifest, themeManifest]) {
       expect(manifest.private).not.toBe(true);
       expect(manifest.type).toBe("module");
       expect(manifest.license).toBe("MIT");
       expect(manifest.engines).toEqual(
-        expect.objectContaining({ node: ">=22" }),
+        expect.objectContaining({ node: "^22.13.0 || >=24.0.0" }),
       );
       expect(manifest.files).toEqual(["src"]);
     }
