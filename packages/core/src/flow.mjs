@@ -4,7 +4,10 @@ const COLUMN_GAP = 90;
 const ROW_GAP = 48;
 const MARGIN = 44;
 
-export function renderFlowDiagram(source, titleId = "flow-diagram-title") {
+export function renderFlowDiagram(
+  source,
+  { markerId = "flow-arrow", titleId = "flow-diagram-title" } = {},
+) {
   const { direction, nodes, edges } = parseFlowDiagram(source);
   const positions = layoutNodes(nodes, edges, direction);
   const width =
@@ -29,7 +32,7 @@ export function renderFlowDiagram(source, titleId = "flow-diagram-title") {
         ? `<text class="flow-edge-label" x="${labelX}" y="${labelY}" text-anchor="middle">${escapeXml(edge.label)}</text>`
         : "";
 
-      return `<g class="flow-edge"><path d="M ${start.x} ${start.y} L ${end.x} ${end.y}" marker-end="url(#flow-arrow)"/>${label}</g>`;
+      return `<g class="flow-edge"><path d="M ${start.x} ${start.y} L ${end.x} ${end.y}" marker-end="url(#${escapeXml(markerId)})"/>${label}</g>`;
     })
     .join("");
 
@@ -55,7 +58,7 @@ export function renderFlowDiagram(source, titleId = "flow-diagram-title") {
   <svg role="img" aria-labelledby="${escapeXml(titleId)}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
     <title id="${escapeXml(titleId)}">Flow diagram</title>
     <defs>
-      <marker id="flow-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <marker id="${escapeXml(markerId)}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
         <path d="M0,0 L8,4 L0,8 z"/>
       </marker>
     </defs>

@@ -305,6 +305,142 @@ describe("buildNote", () => {
     expect(firstHtml).not.toContain('type="application/json"');
   });
 
+  it("preserves remote and unresolved image meaning as deterministic passive links", async () => {
+    const root = temporaryRoot();
+    const inputPath = join(root, "images.md");
+    const firstOutput = join(root, "first.html");
+    const secondOutput = join(root, "second.html");
+    writeFileSync(
+      inputPath,
+      [
+        "---",
+        "title: Passive images",
+        "lang: en",
+        "---",
+        "",
+        '![Remote diagram](https://example.com/diagram.png "Remote title")',
+        "",
+        '![Missing local](./missing.png "Missing title")',
+      ].join("\n"),
+    );
+    let articleHtml = "";
+    const theme = safeTheme((input) => {
+      articleHtml = input.content.articleHtml ?? "";
+      return {
+        lang: input.metadata.lang,
+        styles: "",
+        bodyHtml: `<main>${articleHtml}</main>`,
+      };
+    });
+
+    await buildNote({ inputPath, outputPath: firstOutput, theme });
+    await buildNote({ inputPath, outputPath: secondOutput, theme });
+    const firstHtml = readFileSync(firstOutput, "utf8");
+
+    expect(articleHtml).toContain(
+      '<a href="https://example.com/diagram.png" title="Remote title" data-image-fallback="">Remote diagram</a>',
+    );
+    expect(articleHtml).toContain(
+      '<a href="./missing.png" title="Missing title" data-image-fallback="">Missing local</a>',
+    );
+    expect(articleHtml).not.toMatch(/<img\b[^>]*\bsrc=/i);
+    expect(firstHtml).not.toMatch(/<img\b[^>]*\bsrc=["']https?:/i);
+    expect(verifyArtifactHtml(firstHtml)).toMatchObject({
+      ok: true,
+      contractVersion: 2,
+      mode: "note",
+    });
+    expect(readFileSync(secondOutput, "utf8")).toBe(firstHtml);
+  });
+
+  it("allocates a flow title ID around an existing heading collision", async () => {
+    const root = temporaryRoot();
+    const inputPath = join(root, "heading-collision.md");
+    const outputPath = join(root, "heading-collision.html");
+    writeFileSync(
+      inputPath,
+      [
+        "# Flow Diagram Title 1",
+        "",
+        "```mermaid",
+        "flowchart LR",
+        "A[Source] --> B[HTML]",
+        "```",
+      ].join("\n"),
+    );
+    let articleHtml = "";
+
+    await buildNote({
+      inputPath,
+      outputPath,
+      theme: safeTheme((input) => {
+        articleHtml = input.content.articleHtml ?? "";
+        return {
+          lang: input.metadata.lang,
+          styles: "",
+          bodyHtml: `<main>${articleHtml}</main>`,
+        };
+      }),
+    });
+
+    expect(articleHtml).toContain('<h1 id="flow-diagram-title-1">');
+    expect(articleHtml).toContain('aria-labelledby="flow-diagram-title-1-2"');
+    expect(articleHtml).toContain('<title id="flow-diagram-title-1-2">Flow diagram</title>');
+    expect(verifyArtifactHtml(readFileSync(outputPath, "utf8"))).toMatchObject({
+      ok: true,
+      contractVersion: 2,
+    });
+  });
+
+  it("allocates unique local marker IDs across headings and multiple flows", async () => {
+    const root = temporaryRoot();
+    const inputPath = join(root, "multiple-flows.md");
+    const outputPath = join(root, "multiple-flows.html");
+    const secondOutput = join(root, "multiple-flows-again.html");
+    writeFileSync(
+      inputPath,
+      [
+        "# Flow Arrow",
+        "",
+        "```flow",
+        "flowchart LR",
+        "A[One] --> B[Two]",
+        "```",
+        "",
+        "```mermaid",
+        "flowchart TD",
+        "C[Three] --> D[Four]",
+        "```",
+      ].join("\n"),
+    );
+    let articleHtml = "";
+    const theme = safeTheme((input) => {
+      articleHtml = input.content.articleHtml ?? "";
+      return {
+        lang: input.metadata.lang,
+        styles: "",
+        bodyHtml: `<main>${articleHtml}</main>`,
+      };
+    });
+
+    await buildNote({ inputPath, outputPath, theme });
+    await buildNote({ inputPath, outputPath: secondOutput, theme });
+
+    const ids = [...articleHtml.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(articleHtml).toContain('<marker id="flow-arrow-2"');
+    expect(articleHtml).toContain('marker-end="url(#flow-arrow-2)"');
+    expect(articleHtml).toContain('<marker id="flow-arrow-3"');
+    expect(articleHtml).toContain('marker-end="url(#flow-arrow-3)"');
+    expect(readFileSync(secondOutput, "utf8")).toBe(
+      readFileSync(outputPath, "utf8"),
+    );
+    expect(verifyArtifactHtml(readFileSync(outputPath, "utf8"))).toMatchObject({
+      ok: true,
+      contractVersion: 2,
+    });
+  });
+
   it.each([
     ["unsafe", (input: any) => ({ lang: input.metadata.lang, styles: "", bodyHtml: "<script>bad()</script>" }), "UNSAFE_THEME_OUTPUT"],
     ["throwing", () => { throw new Error("THEME_SECRET"); }, "THEME_RENDER_FAILED"],

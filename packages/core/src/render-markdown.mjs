@@ -20,6 +20,7 @@ const IMAGE_MIME_TYPES = new Map([
 export function renderMarkdown(body, { sourceDirectory }) {
   const headings = extractHeadings(body);
   const headingIds = [...headings];
+  const allocateId = createIdAllocator(headings.map((heading) => heading.id));
   let flowIndex = 0;
   const components = {
     h1: headingComponent("h1", headingIds),
@@ -48,10 +49,12 @@ export function renderMarkdown(body, { sourceDirectory }) {
         if (/\blanguage-(?:mermaid|flow)\b/.test(className)) {
           const source = String(child.props.children || "").replace(/\n$/, "");
           flowIndex += 1;
+          const titleId = allocateId(`flow-diagram-title-${flowIndex}`);
+          const markerId = allocateId("flow-arrow");
           return React.createElement("div", {
             className: "flow-embed",
             dangerouslySetInnerHTML: {
-              __html: renderFlowDiagram(source, `flow-diagram-title-${flowIndex}`),
+              __html: renderFlowDiagram(source, { markerId, titleId }),
             },
           });
         }
@@ -62,9 +65,21 @@ export function renderMarkdown(body, { sourceDirectory }) {
       return React.createElement("code", { className }, children);
     },
     img({ alt, src, title }) {
+      const image = resolveImage(src, sourceDirectory);
+      if (image.kind === "passive") {
+        return React.createElement(
+          "a",
+          {
+            href: image.href,
+            title,
+            "data-image-fallback": "",
+          },
+          alt || title || image.href,
+        );
+      }
       return React.createElement("img", {
         alt: alt || "",
-        src: embedImage(src, sourceDirectory),
+        src: image.src,
         title,
         loading: "lazy",
       });
@@ -93,6 +108,20 @@ export function renderMarkdown(body, { sourceDirectory }) {
   );
 
   return { articleHtml, headings };
+}
+
+function createIdAllocator(reservedIds) {
+  const used = new Set(reservedIds);
+  return function allocateId(base) {
+    let candidate = base;
+    let suffix = 2;
+    while (used.has(candidate)) {
+      candidate = `${base}-${suffix}`;
+      suffix += 1;
+    }
+    used.add(candidate);
+    return candidate;
+  };
 }
 
 function headingComponent(tagName, headingIds) {
@@ -139,15 +168,22 @@ function extractHeadings(markdown) {
   return headings;
 }
 
-function embedImage(src, sourceDirectory) {
-  if (!src || /^(?:data:|https?:\/\/|#)/i.test(src)) return src;
+function resolveImage(src, sourceDirectory) {
+  if (!src) throw new Error("Image source is empty or unsafe");
+  if (/^data:image\//i.test(src)) return { kind: "embedded", src };
+  if (/^https?:\/\//i.test(src) || src.startsWith("#")) {
+    return { kind: "passive", href: src };
+  }
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(src) || src.startsWith("//")) {
+    throw new Error("Unsupported image URL scheme");
+  }
   const decoded = decodeURIComponent(src);
   const path = isAbsolute(decoded)
     ? decoded
     : resolve(sourceDirectory, decoded);
 
   if (!existsSync(path) || !statSync(path).isFile()) {
-    throw new Error(`Local image not found: ${decoded}`);
+    return { kind: "passive", href: src };
   }
 
   const extension = extname(path).toLowerCase();
@@ -160,7 +196,10 @@ function embedImage(src, sourceDirectory) {
   if (bytes.length > 10 * 1024 * 1024) {
     throw new Error(`Local image exceeds 10 MB: ${decoded}`);
   }
-  return `data:${mime};base64,${bytes.toString("base64")}`;
+  return {
+    kind: "embedded",
+    src: `data:${mime};base64,${bytes.toString("base64")}`,
+  };
 }
 
 function slugify(value) {
