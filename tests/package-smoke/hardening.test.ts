@@ -122,6 +122,7 @@ describe("package boundary hardening", () => {
   it("exports independently testable boundary helpers", () => {
     for (const name of [
       "binaryCommandArguments",
+      "controlledNpmEnvironment",
       "hashArchive",
       "inspectPublishedText",
       "installedBinaryPlan",
@@ -433,6 +434,26 @@ describe("package boundary hardening", () => {
     expect(clean).not.toHaveProperty("npm_config_registry");
     expect(clean).not.toHaveProperty("NPM_CONFIG_CACHE");
     expect(clean).not.toHaveProperty("YARN_GLOBAL_FOLDER");
+  });
+
+  it("disables npm update notices in every controlled private environment", () => {
+    expect(smoke.controlledNpmEnvironment({
+      cache: "/tmp/private-cache",
+      globalConfig: "/tmp/global.npmrc",
+      ignoreScripts: true,
+      offline: true,
+      prefix: "/tmp/private-prefix",
+      userConfig: "/tmp/user.npmrc",
+    })).toEqual({
+      npm_config_cache: "/tmp/private-cache",
+      npm_config_globalconfig: "/tmp/global.npmrc",
+      npm_config_ignore_scripts: "true",
+      npm_config_loglevel: "error",
+      npm_config_offline: "true",
+      npm_config_prefix: "/tmp/private-prefix",
+      npm_config_update_notifier: "false",
+      npm_config_userconfig: "/tmp/user.npmrc",
+    });
   });
 
   it("validates canonical pack filenames and independent archive integrity", () => {

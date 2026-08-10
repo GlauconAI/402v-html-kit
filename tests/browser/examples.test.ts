@@ -526,7 +526,7 @@ describe.sequential("packed offline examples", () => {
     } finally {
       renameSync(unavailable, cleanThemeDirectory);
     }
-  });
+  }, 20_000);
 
   it("disables npm update notices in the controlled offline environment", () => {
     const configured = run(

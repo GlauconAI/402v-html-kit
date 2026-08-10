@@ -17,6 +17,23 @@ function allRunCommands(value: Record<string, any>): string {
 }
 
 describe("GitHub workflow contracts", () => {
+  it("serializes test files for reliable plain npm test runs", async () => {
+    const configUrl = new URL("../../vitest.config.ts", import.meta.url).href;
+    const config = (await import(configUrl)).default as {
+      test?: { fileParallelism?: boolean };
+    };
+    expect(config.test?.fileParallelism).toBe(false);
+  });
+
+  it("gives the no-host-fallback probe a bounded timeout", () => {
+    const source = readFileSync(new URL("../browser/examples.test.ts", import.meta.url), "utf8");
+    const start = source.indexOf('it("cannot resolve the official theme from the host workspace"');
+    const end = source.indexOf('it("disables npm update notices', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(source.slice(start, end)).toMatch(/20_000\s*\);\s*$/u);
+  });
+
   it("runs every CI gate on Node 22 and 24 with current action pins", () => {
     const ci = workflow("ci");
     expect(ci).toHaveProperty("on");

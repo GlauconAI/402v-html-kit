@@ -180,6 +180,7 @@ const explicitEnvironmentAllowlist = new Set([
   "npm_config_loglevel",
   "npm_config_offline",
   "npm_config_prefix",
+  "npm_config_update_notifier",
   "npm_config_userconfig",
 ]);
 
@@ -200,6 +201,30 @@ export function sanitizedEnvironment(inherited = process.env, overrides = {}) {
     }
   }
   return environment;
+}
+
+export function controlledNpmEnvironment({
+  cache,
+  globalConfig,
+  ignoreScripts,
+  offline,
+  prefix,
+  userConfig,
+} = {}) {
+  return sanitizedEnvironment({}, {
+    ...(cache === undefined ? {} : { npm_config_cache: cache }),
+    ...(globalConfig === undefined
+      ? {}
+      : { npm_config_globalconfig: globalConfig }),
+    ...(ignoreScripts === undefined
+      ? {}
+      : { npm_config_ignore_scripts: ignoreScripts }),
+    npm_config_loglevel: "error",
+    ...(offline === undefined ? {} : { npm_config_offline: offline }),
+    ...(prefix === undefined ? {} : { npm_config_prefix: prefix }),
+    npm_config_update_notifier: "false",
+    ...(userConfig === undefined ? {} : { npm_config_userconfig: userConfig }),
+  });
 }
 
 function sensitiveCredentialName(name) {
@@ -1668,17 +1693,17 @@ setInterval(() => {}, 1000);`,
     mkdirSync(npmConfigRoot);
     writeFileSync(userConfig, "");
     writeFileSync(globalConfig, "");
-    const npmHostEnvironment = {
-      npm_config_globalconfig: globalConfig,
-      npm_config_loglevel: "error",
-      npm_config_userconfig: userConfig,
-    };
-    const npmPrivateEnvironment = {
-      ...npmHostEnvironment,
-      npm_config_cache: privateCache,
-      npm_config_ignore_scripts: "true",
-      npm_config_prefix: privatePrefix,
-    };
+    const npmHostEnvironment = controlledNpmEnvironment({
+      globalConfig,
+      userConfig,
+    });
+    const npmPrivateEnvironment = controlledNpmEnvironment({
+      cache: privateCache,
+      globalConfig,
+      ignoreScripts: true,
+      prefix: privatePrefix,
+      userConfig,
+    });
     const canonicalEnvironment = sanitizedEnvironment();
     const npmExecPath = process.env.npm_execpath;
     if (process.platform === "win32" && npmExecPath !== undefined && !existsSync(npmExecPath)) {

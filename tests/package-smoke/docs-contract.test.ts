@@ -10,6 +10,7 @@ const requiredDocuments = [
   "SECURITY.md",
   "CONTRIBUTING.md",
   "CHANGELOG.md",
+  ".github/PULL_REQUEST_TEMPLATE.md",
   "docs/architecture.md",
   "docs/artifact-contract-v2.md",
   "docs/theme-contract-v1.md",
@@ -164,6 +165,23 @@ describe("public documentation contract", () => {
     expect(read("CONTRIBUTING.md")).toMatch(/Semantic Versioning|SemVer/u);
     expect(read("CONTRIBUTING.md")).toMatch(/GlauconAI maintainers[\s\S]*release/iu);
     expect(read("CHANGELOG.md")).toContain("## [0.1.0]");
+    const pullRequest = read(".github/PULL_REQUEST_TEMPLATE.md");
+    for (const requirement of [
+      /TDD|failing test/iu,
+      /typecheck/iu,
+      /full test/iu,
+      /deterministic/iu,
+      /pack/iu,
+      /license/iu,
+      /forbidden/iu,
+      /security boundar/iu,
+      /documentation|docs/iu,
+      /changelog/iu,
+      /publish|deploy/iu,
+      /authoriz/iu,
+    ]) {
+      expect(pullRequest).toMatch(requirement);
+    }
   });
 
   it("keeps every local Markdown link resolvable", () => {
