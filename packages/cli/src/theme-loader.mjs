@@ -259,10 +259,10 @@ function importReferences(source) {
   }
 
   const references = [];
-  const pending = [program];
+  const pending = [{ deferred: false, node: program, parent: undefined }];
   let nodes = 0;
   while (pending.length > 0) {
-    const node = pending.pop();
+    const { deferred, node, parent } = pending.pop();
     if (node === null || typeof node !== "object") continue;
     nodes += 1;
     if (nodes > MAX_LOCAL_AST_NODES) {
@@ -283,6 +283,21 @@ function importReferences(source) {
       ) {
         fail("Local theme dynamic imports must use string literals");
       }
+      if (
+        isAbsolute(sourceNode.value) ||
+        !localSpecifier(sourceNode.value)
+      ) {
+        fail("Local theme dynamic imports must use relative paths");
+      }
+      if (
+        deferred ||
+        parent?.type !== "AwaitExpression" ||
+        parent.argument !== node
+      ) {
+        fail(
+          "Local theme dynamic imports must be directly awaited at top level",
+        );
+      }
     }
     if (sourceNode !== null && sourceNode !== undefined) {
       if (
@@ -297,9 +312,21 @@ function importReferences(source) {
         start: sourceNode.start,
       });
     }
+    const childDeferred =
+      deferred ||
+      node.type === "FunctionDeclaration" ||
+      node.type === "FunctionExpression" ||
+      node.type === "ArrowFunctionExpression" ||
+      node.type === "ClassDeclaration" ||
+      node.type === "ClassExpression";
     for (const value of Object.values(node)) {
-      if (Array.isArray(value)) pending.push(...value);
-      else if (value !== null && typeof value === "object") pending.push(value);
+      if (Array.isArray(value)) {
+        for (const child of value) {
+          pending.push({ deferred: childDeferred, node: child, parent: node });
+        }
+      } else if (value !== null && typeof value === "object") {
+        pending.push({ deferred: childDeferred, node: value, parent: node });
+      }
     }
   }
   return references;

@@ -184,6 +184,70 @@ describe("loadTheme", () => {
     expect(() => statSync(sentinel)).toThrow();
   });
 
+  it("rejects literal dynamic imports deferred inside theme methods", async () => {
+    const root = temporaryRoot();
+    const sentinel = join(root, "deferred-method-ran");
+    writeFileSync(join(root, "helper.mjs"), "export const value = 1;\n");
+    writeFileSync(
+      join(root, "theme.mjs"),
+      `import { writeFileSync } from "node:fs";
+       writeFileSync(${JSON.stringify(sentinel)}, "ran");
+       export default {
+         themeContractVersion: 1, id: "x", version: "1.0.0", displayName: "x",
+         render() {
+           void import("./helper.mjs").catch(() => {});
+           return { lang: "en", styles: "", bodyHtml: "<main></main>" };
+         }
+       };\n`,
+    );
+
+    await expect(loadTheme("./theme.mjs", root)).rejects.toMatchObject({
+      code: "THEME_RESOLUTION_FAILED",
+    });
+    expect(() => statSync(sentinel)).toThrow();
+    expect(
+      readdirSync(root).filter((name) => name.startsWith(".402v-theme-")),
+    ).toEqual([]);
+  });
+
+  it("rejects top-level literal dynamic imports that are not directly awaited", async () => {
+    const root = temporaryRoot();
+    const sentinel = join(root, "unawaited-import-ran");
+    writeFileSync(join(root, "helper.mjs"), "export const value = 1;\n");
+    writeFileSync(
+      join(root, "theme.mjs"),
+      `import { writeFileSync } from "node:fs";
+       writeFileSync(${JSON.stringify(sentinel)}, "ran");
+       void import("./helper.mjs").catch(() => {});
+       export default { themeContractVersion: 1, id: "x", version: "1.0.0", displayName: "x", render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; } };\n`,
+    );
+
+    await expect(loadTheme("./theme.mjs", root)).rejects.toMatchObject({
+      code: "THEME_RESOLUTION_FAILED",
+    });
+    expect(() => statSync(sentinel)).toThrow();
+    expect(
+      readdirSync(root).filter((name) => name.startsWith(".402v-theme-")),
+    ).toEqual([]);
+  });
+
+  it("rejects directly awaited dynamic imports that are not relative", async () => {
+    const root = temporaryRoot();
+    const sentinel = join(root, "bare-dynamic-import-ran");
+    writeFileSync(
+      join(root, "theme.mjs"),
+      `import { writeFileSync } from "node:fs";
+       writeFileSync(${JSON.stringify(sentinel)}, "ran");
+       await import("node:path");
+       export default { themeContractVersion: 1, id: "x", version: "1.0.0", displayName: "x", render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; } };\n`,
+    );
+
+    await expect(loadTheme("./theme.mjs", root)).rejects.toMatchObject({
+      code: "THEME_RESOLUTION_FAILED",
+    });
+    expect(() => statSync(sentinel)).toThrow();
+  });
+
   it("rejects rewritten output expansion before allocating or executing", async () => {
     const root = temporaryRoot();
     const sentinel = join(root, "expanded-output-ran");
