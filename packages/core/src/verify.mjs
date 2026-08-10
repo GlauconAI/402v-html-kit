@@ -13,27 +13,29 @@ const VERIFY_FILE_KEYS = new Set([
 
 function invalidVerificationOptions(message) {
   throw new ArtifactBuildError(
-    "ARTIFACT_VERIFICATION_FAILED",
+    "INVALID_VERIFY_OPTIONS",
     "Artifact verification received invalid options",
     { issues: [{ code: "INVALID_VERIFICATION_OPTIONS", message }] },
   );
 }
 
 function inspectVerifyFileOptions(options) {
-  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+  if (options === null || typeof options !== "object") {
     invalidVerificationOptions("Verification options must be a plain object");
   }
+  let array;
   let descriptors;
   let keys;
   let prototype;
   try {
+    array = Array.isArray(options);
     descriptors = Object.getOwnPropertyDescriptors(options);
     keys = Reflect.ownKeys(options);
     prototype = Object.getPrototypeOf(options);
   } catch {
     invalidVerificationOptions("Verification options cannot be inspected safely");
   }
-  if (prototype !== Object.prototype && prototype !== null) {
+  if (array || (prototype !== Object.prototype && prototype !== null)) {
     invalidVerificationOptions("Verification options must be a plain object");
   }
   const values = Object.create(null);

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { lstatSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 
 import { assembleArtifactV2Unchecked } from "./document-v2.mjs";
 import { ArtifactBuildError } from "./errors.mjs";
@@ -32,20 +32,22 @@ function fail(code, message, details = undefined, options = undefined) {
 }
 
 function inspectRecord(value, allowedKeys, code, label) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+  if (value === null || typeof value !== "object") {
     fail(code, `${label} must be a plain object`);
   }
+  let array;
   let descriptors;
   let keys;
   let prototype;
   try {
+    array = Array.isArray(value);
     descriptors = Object.getOwnPropertyDescriptors(value);
     keys = Reflect.ownKeys(value);
     prototype = Object.getPrototypeOf(value);
   } catch (cause) {
     fail(code, `${label} cannot be inspected safely`, undefined, { cause });
   }
-  if (prototype !== Object.prototype && prototype !== null) {
+  if (array || (prototype !== Object.prototype && prototype !== null)) {
     fail(code, `${label} must be a plain object`);
   }
   const values = Object.create(null);
@@ -177,17 +179,59 @@ function assertWritableDestination(outputPath, force) {
   });
 }
 
-function prepareOutputDirectory(outputPath) {
+function pinOutputParent(outputPath) {
+  const requestedParent = dirname(outputPath);
+  let canonicalParent;
+  let stats;
   try {
-    mkdirSync(dirname(outputPath), { recursive: true });
+    canonicalParent = realpathSync(requestedParent);
+    stats = statSync(canonicalParent, { bigint: true });
   } catch (cause) {
     fail(
-      "ATOMIC_WRITE_FAILED",
-      "Unable to prepare the output directory",
+      "INVALID_BUILD_OPTIONS",
+      "Output parent must already resolve to a local directory",
       { output: outputPath },
       { cause },
     );
   }
+  if (!stats.isDirectory()) {
+    fail("INVALID_BUILD_OPTIONS", "Output parent must resolve to a directory", {
+      output: outputPath,
+    });
+  }
+  return Object.freeze({
+    requestedParent,
+    canonicalParent,
+    identity: Object.freeze({ dev: stats.dev, ino: stats.ino }),
+    destination: resolve(canonicalParent, basename(outputPath)),
+  });
+}
+
+function revalidateOutputParent(pin, requestedOutput) {
+  let canonicalParent;
+  let stats;
+  try {
+    canonicalParent = realpathSync(pin.requestedParent);
+    stats = statSync(canonicalParent, { bigint: true });
+  } catch (cause) {
+    fail(
+      "INVALID_BUILD_OPTIONS",
+      "Output parent changed while rendering",
+      { output: requestedOutput },
+      { cause },
+    );
+  }
+  if (
+    !stats.isDirectory() ||
+    canonicalParent !== pin.canonicalParent ||
+    stats.dev !== pin.identity.dev ||
+    stats.ino !== pin.identity.ino
+  ) {
+    fail("INVALID_BUILD_OPTIONS", "Output parent changed while rendering", {
+      output: requestedOutput,
+    });
+  }
+  return pin.destination;
 }
 
 function sha256(value) {
@@ -251,8 +295,9 @@ export async function buildInteractiveArtifact(options) {
     "verifyDeterminism",
   );
 
-  assertDistinctPaths(manifestPath, outputPath);
-  assertWritableDestination(outputPath, force);
+  const outputPin = pinOutputParent(outputPath);
+  assertDistinctPaths(manifestPath, outputPin.destination);
+  assertWritableDestination(outputPin.destination, force);
   const first = await renderPipeline(manifestPath, theme, themeIdentity);
   if (verifyDeterminism) {
     const second = await renderPipeline(manifestPath, theme, themeIdentity);
@@ -266,8 +311,10 @@ export async function buildInteractiveArtifact(options) {
   const verification = verifyArtifactHtml(first.html, {
     requiredDataBlocks: first.model.requiredDataBlocks,
   });
-  prepareOutputDirectory(outputPath);
-  atomicWriteUtf8(outputPath, first.html, { overwrite: force });
+  const destination = revalidateOutputParent(outputPin, outputPath);
+  assertDistinctPaths(manifestPath, destination);
+  assertWritableDestination(destination, force);
+  atomicWriteUtf8(destination, first.html, { overwrite: force });
   return {
     ok: true,
     contractVersion: 2,

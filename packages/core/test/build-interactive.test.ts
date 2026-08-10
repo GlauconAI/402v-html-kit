@@ -423,6 +423,25 @@ describe("themed interactive artifact build", () => {
     );
   });
 
+  it("normalizes revoked build and verify option proxies", async () => {
+    const build = Proxy.revocable({}, {});
+    build.revoke();
+    await expectRejection(
+      () => buildInteractiveArtifact(build.proxy as any),
+      "INVALID_BUILD_OPTIONS",
+    );
+
+    const verify = Proxy.revocable({}, {});
+    verify.revoke();
+    let caught: unknown;
+    try {
+      verifyArtifact(verify.proxy as any);
+    } catch (error) {
+      caught = error;
+    }
+    captureError(caught, "INVALID_VERIFY_OPTIONS");
+  });
+
   it.each(["prototype", "symbol"])(
     "rejects a manifest with a hostile %s shape",
     async (shape) => {
@@ -532,6 +551,111 @@ describe("themed interactive artifact build", () => {
     expect(readdirSync(race.root).filter((name) => name.includes(".tmp-"))).toEqual([]);
   });
 
+  it.each([
+    ["renderer", false],
+    ["theme", true],
+  ] as const)(
+    "rejects an output parent symlink redirected by the %s without touching the manifest",
+    async (mutator, verifyDeterminism) => {
+      const project = writeProject();
+      const safeParent = join(project.root, "safe-output");
+      const parentLink = join(project.root, "output-parent");
+      mkdirSync(safeParent);
+      symlinkSync("safe-output", parentLink);
+      const outputPath = join(parentLink, "artifact.mjs");
+      const originalManifest = readFileSync(project.manifestPath, "utf8");
+      const redirect = () => {
+        rmSync(parentLink);
+        symlinkSync(".", parentLink);
+      };
+
+      let suppliedTheme = theme();
+      if (mutator === "renderer") {
+        writeFileSync(
+          join(project.root, "assets", "renderer.mjs"),
+          `export function renderArtifact() {
+            const fs = process.getBuiltinModule("node:fs");
+            fs.unlinkSync(${JSON.stringify(parentLink)});
+            fs.symlinkSync(".", ${JSON.stringify(parentLink)});
+            return { mainSections: "<main>Ready</main>" };
+          }`,
+        );
+      } else {
+        let redirected = false;
+        suppliedTheme = theme((input) => {
+          if (!redirected) {
+            redirected = true;
+            redirect();
+          }
+          return {
+            lang: "en",
+            styles: "",
+            bodyHtml: `<main>${input.content.slots.mainSections}</main>`,
+          };
+        });
+      }
+
+      await expectRejection(
+        () => buildInteractiveArtifact({
+          manifestPath: project.manifestPath,
+          outputPath,
+          force: true,
+          theme: suppliedTheme,
+          verifyDeterminism,
+        }),
+        "INVALID_BUILD_OPTIONS",
+      );
+      expect(readFileSync(project.manifestPath, "utf8")).toBe(originalManifest);
+      expect(existsSync(join(safeParent, "artifact.mjs"))).toBe(false);
+    },
+  );
+
+  it.each(["hardlink", "symlink"])(
+    "rechecks a manifest %s installed as the destination during rendering",
+    async (aliasKind) => {
+      const project = writeProject();
+      const originalManifest = readFileSync(project.manifestPath, "utf8");
+      writeFileSync(
+        join(project.root, "assets", "renderer.mjs"),
+        `export function renderArtifact() {
+          const fs = process.getBuiltinModule("node:fs");
+          fs.${aliasKind === "hardlink" ? "linkSync" : "symlinkSync"}(
+            ${JSON.stringify(project.manifestPath)},
+            ${JSON.stringify(project.outputPath)}
+          );
+          return { mainSections: "<main>Ready</main>" };
+        }`,
+      );
+
+      await expectRejection(
+        () => buildInteractiveArtifact({
+          manifestPath: project.manifestPath,
+          outputPath: project.outputPath,
+          force: true,
+          theme: theme(),
+          verifyDeterminism: false,
+        }),
+        "INVALID_BUILD_OPTIONS",
+      );
+      expect(readFileSync(project.manifestPath, "utf8")).toBe(originalManifest);
+    },
+  );
+
+  it("does not create a missing output parent while trying to pin it", async () => {
+    const project = writeProject();
+    const missingParent = join(project.root, "missing", "output");
+
+    await expectRejection(
+      () => buildInteractiveArtifact({
+        manifestPath: project.manifestPath,
+        outputPath: join(missingParent, "artifact.html"),
+        theme: theme(),
+      }),
+      "INVALID_BUILD_OPTIONS",
+    );
+    expect(existsSync(missingParent)).toBe(false);
+  });
+
   it("rejects traversal and escaping symlinks under the trusted root", async () => {
     const traversal = writeProject();
     writeFileSync(
@@ -622,7 +746,7 @@ describe("themed interactive artifact build", () => {
     } catch (error) {
       caught = error;
     }
-    captureError(caught, "ARTIFACT_VERIFICATION_FAILED");
+    captureError(caught, "INVALID_VERIFY_OPTIONS");
     expect(getterCalls).toBe(0);
 
     const root = temporaryRoot();
