@@ -1,4 +1,5 @@
 import { ArtifactBuildError } from "./errors.mjs";
+import { ARTIFACT_RESOURCE_LIMITS } from "./resource-limits.mjs";
 
 const NODE_WIDTH = 180;
 const NODE_HEIGHT = 72;
@@ -10,57 +11,43 @@ function fail(message, details = undefined) {
   throw new ArtifactBuildError("INVALID_FLOW_DIAGRAM", message, details);
 }
 
+function failResource(message) {
+  throw new ArtifactBuildError("RESOURCE_LIMIT_EXCEEDED", message);
+}
+
 export function renderFlowDiagram(
   source,
-  { markerId = "flow-arrow", titleId = "flow-diagram-title" } = {},
+  {
+    markerId = "flow-arrow",
+    titleId = "flow-diagram-title",
+    resourceLimits = ARTIFACT_RESOURCE_LIMITS,
+  } = {},
 ) {
-  const { direction, nodes, edges } = parseFlowDiagram(source);
+  const { direction, nodes, edges } = parseFlowDiagram(source, {
+    resourceLimits,
+  });
   const positions = layoutNodes(nodes, edges, direction);
-  const width =
-    Math.max(...positions.map((position) => position.x + NODE_WIDTH), 0) +
-    MARGIN;
-  const height =
-    Math.max(...positions.map((position) => position.y + NODE_HEIGHT), 0) +
-    MARGIN;
-  const positionById = new Map(
-    positions.map((position) => [position.id, position]),
-  );
+  let maximumX = 0;
+  let maximumY = 0;
+  const positionById = new Map();
+  for (const position of positions) {
+    maximumX = Math.max(maximumX, position.x + NODE_WIDTH);
+    maximumY = Math.max(maximumY, position.y + NODE_HEIGHT);
+    positionById.set(position.id, position);
+  }
+  const width = maximumX + MARGIN;
+  const height = maximumY + MARGIN;
+  const markup = [];
+  let projectedBytes = 0;
+  const append = (fragment) => {
+    projectedBytes += Buffer.byteLength(fragment, "utf8");
+    if (projectedBytes > resourceLimits.svgBytes) {
+      failResource("Flow SVG exceeds its projected byte limit");
+    }
+    markup.push(fragment);
+  };
 
-  const edgeMarkup = edges
-    .map((edge) => {
-      const from = positionById.get(edge.from);
-      const to = positionById.get(edge.to);
-      const start = nodeAnchor(from, to, direction);
-      const end = nodeAnchor(to, from, direction);
-      const labelX = (start.x + end.x) / 2;
-      const labelY = (start.y + end.y) / 2 - 8;
-      const label = edge.label
-        ? `<text class="flow-edge-label" x="${labelX}" y="${labelY}" text-anchor="middle">${escapeXml(edge.label)}</text>`
-        : "";
-
-      return `<g class="flow-edge"><path d="M ${start.x} ${start.y} L ${end.x} ${end.y}" marker-end="url(#${escapeXml(markerId)})"/>${label}</g>`;
-    })
-    .join("");
-
-  const nodeMarkup = positions
-    .map((position) => {
-      const node = nodes.get(position.id);
-      const shape = renderNodeShape(position, node.shape);
-      const labelLines = wrapLabel(node.label, 22);
-      const firstY =
-        position.y + NODE_HEIGHT / 2 - ((labelLines.length - 1) * 17) / 2;
-      const text = labelLines
-        .map(
-          (line, index) =>
-            `<tspan x="${position.x + NODE_WIDTH / 2}" y="${firstY + index * 17}">${escapeXml(line)}</tspan>`,
-        )
-        .join("");
-
-      return `<g class="flow-node flow-node-${node.shape}" data-node-id="${escapeXml(position.id)}">${shape}<text text-anchor="middle">${text}</text></g>`;
-    })
-    .join("");
-
-  return `<figure class="flow-diagram" data-diagram="flowchart">
+  append(`<figure class="flow-diagram" data-diagram="flowchart">
   <svg role="img" aria-labelledby="${escapeXml(titleId)}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
     <title id="${escapeXml(titleId)}">Flow diagram</title>
     <defs>
@@ -68,37 +55,74 @@ export function renderFlowDiagram(
         <path d="M0,0 L8,4 L0,8 z"/>
       </marker>
     </defs>
-    ${edgeMarkup}
-    ${nodeMarkup}
+    `);
+  for (const edge of edges) {
+    const from = positionById.get(edge.from);
+    const to = positionById.get(edge.to);
+    const start = nodeAnchor(from, to, direction);
+    const end = nodeAnchor(to, from, direction);
+    const labelX = (start.x + end.x) / 2;
+    const labelY = (start.y + end.y) / 2 - 8;
+    const label = edge.label
+      ? `<text class="flow-edge-label" x="${labelX}" y="${labelY}" text-anchor="middle">${escapeXml(edge.label)}</text>`
+      : "";
+    append(`<g class="flow-edge"><path d="M ${start.x} ${start.y} L ${end.x} ${end.y}" marker-end="url(#${escapeXml(markerId)})"/>${label}</g>`);
+  }
+  append("\n    ");
+  for (const position of positions) {
+    const node = nodes.get(position.id);
+    const shape = renderNodeShape(position, node.shape);
+    const labelLines = wrapLabel(node.label, 22);
+    const firstY =
+      position.y + NODE_HEIGHT / 2 - ((labelLines.length - 1) * 17) / 2;
+    let text = "";
+    for (let index = 0; index < labelLines.length; index += 1) {
+      text += `<tspan x="${position.x + NODE_WIDTH / 2}" y="${firstY + index * 17}">${escapeXml(labelLines[index])}</tspan>`;
+    }
+    append(`<g class="flow-node flow-node-${node.shape}" data-node-id="${escapeXml(position.id)}">${shape}<text text-anchor="middle">${text}</text></g>`);
+  }
+  append(`
   </svg>
-</figure>`;
+</figure>`);
+  return markup.join("");
 }
 
-export function parseFlowDiagram(source) {
+export function parseFlowDiagram(
+  source,
+  { resourceLimits = ARTIFACT_RESOURCE_LIMITS } = {},
+) {
   if (typeof source !== "string" || !source.trim()) {
     fail("Flow diagram is empty");
   }
-
-  const lines = source
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line, index) => ({ line: index + 1, text: line.trim() }))
-    .filter(({ text }) => text && !text.startsWith("%%"));
-  let direction = "LR";
-
-  if (/^flowchart\s+/i.test(lines[0]?.text || "")) {
-    const declaration = lines.shift();
-    const match = declaration.text.match(/^flowchart\s+(LR|TD)$/i);
-    if (!match) {
-      fail("Flow direction must be LR or TD", { line: declaration.line });
-    }
-    direction = match[1].toUpperCase();
+  if (Buffer.byteLength(source, "utf8") > resourceLimits.slotBytes) {
+    failResource("Flow source exceeds its byte limit");
   }
 
+  let direction = "LR";
   const nodes = new Map();
   const edges = [];
+  let structures = 0;
+  let firstStatement = true;
+  const reserveStructure = () => {
+    structures += 1;
+    if (structures > resourceLimits.canonicalJsonNodes) {
+      failResource("Flow structure exceeds its syntax record limit");
+    }
+  };
 
-  for (const entry of lines) {
+  for (const entry of flowSourceLines(source)) {
+    if (!entry.text || entry.text.startsWith("%%")) continue;
+    reserveStructure();
+    if (firstStatement && /^flowchart\s+/i.test(entry.text)) {
+      const match = entry.text.match(/^flowchart\s+(LR|TD)$/i);
+      if (!match) {
+        fail("Flow direction must be LR or TD", { line: entry.line });
+      }
+      direction = match[1].toUpperCase();
+      firstStatement = false;
+      continue;
+    }
+    firstStatement = false;
     const match = entry.text.match(
       /^(.+?)\s*-->\s*(?:\|([^|]+)\|\s*)?(.+)$/,
     );
@@ -110,8 +134,9 @@ export function parseFlowDiagram(source) {
 
     const from = parseEndpoint(match[1].trim(), entry.line);
     const to = parseEndpoint(match[3].trim(), entry.line);
-    upsertNode(nodes, from);
-    upsertNode(nodes, to);
+    upsertNode(nodes, from, reserveStructure);
+    upsertNode(nodes, to, reserveStructure);
+    reserveStructure();
     edges.push({
       from: from.id,
       to: to.id,
@@ -124,6 +149,21 @@ export function parseFlowDiagram(source) {
   }
 
   return { direction, nodes, edges };
+}
+
+function* flowSourceLines(source) {
+  let start = 0;
+  let line = 1;
+  for (let index = 0; index <= source.length; index += 1) {
+    const atEnd = index === source.length;
+    if (!atEnd && source[index] !== "\n" && source[index] !== "\r") continue;
+    yield { line, text: source.slice(start, index).trim() };
+    if (!atEnd && source[index] === "\r" && source[index + 1] === "\n") {
+      index += 1;
+    }
+    start = index + 1;
+    line += 1;
+  }
 }
 
 function parseEndpoint(value, line) {
@@ -139,8 +179,9 @@ function parseEndpoint(value, line) {
   return { id: match[1], label, shape };
 }
 
-function upsertNode(nodes, candidate) {
+function upsertNode(nodes, candidate, reserveStructure) {
   const existing = nodes.get(candidate.id);
+  if (!existing) reserveStructure();
   if (!existing || candidate.label !== candidate.id) {
     nodes.set(candidate.id, candidate);
   }

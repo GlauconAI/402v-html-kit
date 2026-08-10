@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   truncateSync,
   writeFileSync,
 } from "node:fs";
@@ -28,6 +29,7 @@ import type {
   ThemeRenderResult,
 } from "../src/index.mjs";
 import * as core from "../src/index.mjs";
+import { renderFlowDiagram } from "../src/flow.mjs";
 import { renderMarkdown } from "../src/render-markdown.mjs";
 
 const require = createRequire(import.meta.url);
@@ -661,6 +663,94 @@ describe("buildNote", () => {
     }));
   });
 
+  it("allocates globally unique heading IDs within the 256-byte contract limit", () => {
+    const ascii = "a".repeat(300);
+    const multibyte = "界".repeat(100);
+    const { headings } = renderMarkdown(
+      [
+        "# A",
+        "# A-2",
+        "# A",
+        `# ${ascii}`,
+        `# ${ascii}`,
+        `# ${multibyte}`,
+        `# ${multibyte}`,
+      ].join("\n\n"),
+      { sourceDirectory: "/virtual/note" },
+    );
+
+    expect(headings.slice(0, 3).map(({ id }) => id)).toEqual([
+      "a",
+      "a-2",
+      "a-3",
+    ]);
+    expect(headings.slice(3).map(({ id }) => id)).toEqual([
+      "a".repeat(256),
+      `${"a".repeat(254)}-2`,
+      "界".repeat(85),
+      `${"界".repeat(84)}-2`,
+    ]);
+    expect(new Set(headings.map(({ id }) => id)).size).toBe(headings.length);
+    for (const { id } of headings) {
+      expect(Buffer.byteLength(id, "utf8")).toBeLessThanOrEqual(256);
+      expect(Buffer.from(id, "utf8").toString("utf8")).toBe(id);
+    }
+  });
+
+  it("bounds flow source bytes before parsing and accepts the exact limit", () => {
+    const source = "flowchart LR\nA[One] --> B[Two]";
+    const sourceBytes = Buffer.byteLength(source, "utf8");
+    const render = (slotBytes: number) =>
+      renderMarkdown(`\`\`\`flow\n${source}\n\`\`\``, {
+        sourceDirectory: "/virtual/note",
+        resourceLimits: { ...ARTIFACT_RESOURCE_LIMITS, slotBytes },
+      });
+
+    expect(render(sourceBytes).articleHtml).toContain('data-diagram="flowchart"');
+    expect(() => render(sourceBytes - 1)).toThrowError(expect.objectContaining({
+      name: "ArtifactBuildError",
+      code: "RESOURCE_LIMIT_EXCEEDED",
+    }));
+  });
+
+  it("incrementally accounts for flow lines, nodes, and edges", () => {
+    const source = "flowchart LR\nA[One] --> B[Two]";
+    const render = (canonicalJsonNodes: number) =>
+      renderFlowDiagram(source, {
+        resourceLimits: { ...ARTIFACT_RESOURCE_LIMITS, canonicalJsonNodes },
+      });
+
+    expect(render(5)).toContain('data-diagram="flowchart"');
+    expect(() => render(4)).toThrowError(expect.objectContaining({
+      name: "ArtifactBuildError",
+      code: "RESOURCE_LIMIT_EXCEEDED",
+    }));
+  });
+
+  it("bounds projected flow SVG bytes while preserving exact normal markup", () => {
+    const source = "flowchart LR\nA[One] --> B[Two]";
+    const baseline = renderFlowDiagram(source);
+    const svgBytes = Buffer.byteLength(baseline, "utf8");
+    const render = (maximum: number) =>
+      renderFlowDiagram(source, {
+        resourceLimits: { ...ARTIFACT_RESOURCE_LIMITS, svgBytes: maximum },
+      });
+
+    expect(render(svgBytes)).toBe(baseline);
+    expect(() => render(svgBytes - 1)).toThrowError(expect.objectContaining({
+      name: "ArtifactBuildError",
+      code: "RESOURCE_LIMIT_EXCEEDED",
+    }));
+  });
+
+  it("preserves flow layout across LF, CRLF, and CR line endings", () => {
+    const source = "flowchart LR\nA[One] --> B[Two]";
+    const baseline = renderFlowDiagram(source);
+
+    expect(renderFlowDiagram(source.replaceAll("\n", "\r\n"))).toBe(baseline);
+    expect(renderFlowDiagram(source.replaceAll("\n", "\r"))).toBe(baseline);
+  });
+
   it.each([
     ["unsafe", (input: any) => ({ lang: input.metadata.lang, styles: "", bodyHtml: "<script>bad()</script>" }), "UNSAFE_THEME_OUTPUT"],
     ["throwing", () => { throw new Error("THEME_SECRET"); }, "THEME_RENDER_FAILED"],
@@ -849,6 +939,71 @@ describe("buildNote", () => {
     expect((caught as Error).cause).toBeUndefined();
     expect(JSON.stringify((caught as ArtifactBuildError).toJSON())).not.toContain(
       "PRIVATE_",
+    );
+  });
+
+  it("passes a hard cap to an injected image reader and preserves its limit failure", () => {
+    let maximumBytes: number | undefined;
+    let caught: unknown;
+    try {
+      renderMarkdown("![private](race.png)", {
+        sourceDirectory: "/PRIVATE_DIRECTORY",
+        imageIo: {
+          stat() {
+            return { isFile: () => true, size: 3 };
+          },
+          readFile(_path: string, maximum: number) {
+            maximumBytes = maximum;
+            throw new ArtifactBuildError(
+              "RESOURCE_LIMIT_EXCEEDED",
+              "Local Markdown image exceeds its byte limit",
+            );
+          },
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(maximumBytes).toBe(10 * 1024 * 1024);
+    expect(caught).toMatchObject({
+      name: "ArtifactBuildError",
+      code: "RESOURCE_LIMIT_EXCEEDED",
+    });
+    expect(JSON.stringify((caught as ArtifactBuildError).toJSON())).not.toContain(
+      "PRIVATE_",
+    );
+  });
+
+  it("bounds stat-to-read image growth and closes the default reader descriptor", () => {
+    const root = temporaryRoot();
+    const imagePath = join(root, "race.png");
+    writeFileSync(imagePath, Buffer.from([0x01, 0x02, 0x03]));
+    const descriptorsBefore = readdirSync("/dev/fd").length;
+    let caught: unknown;
+
+    try {
+      renderMarkdown("![private](race.png)", {
+        sourceDirectory: root,
+        imageIo: {
+          stat(path: string) {
+            const stable = statSync(path);
+            truncateSync(path, 10 * 1024 * 1024 + 1);
+            return stable;
+          },
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      name: "ArtifactBuildError",
+      code: "RESOURCE_LIMIT_EXCEEDED",
+    });
+    expect(readdirSync("/dev/fd").length).toBe(descriptorsBefore);
+    expect(JSON.stringify((caught as ArtifactBuildError).toJSON())).not.toContain(
+      root,
     );
   });
 

@@ -2,7 +2,13 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  openSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { extname, isAbsolute, resolve } from "node:path";
 
 import { ArtifactBuildError } from "./errors.mjs";
@@ -19,15 +25,17 @@ const IMAGE_MIME_TYPES = new Map([
   [".webp", "image/webp"],
 ]);
 const MAX_LOCAL_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_HEADING_ID_BYTES = 256;
+const IMAGE_READ_CHUNK_BYTES = 64 * 1024;
 /**
  * @type {Readonly<{
- *   readFile(path: string): Buffer,
+ *   readFile(path: string, maximumBytes: number): Buffer,
  *   stat(path: string): { isFile(): boolean, size: number },
  * }>}
  */
 const DEFAULT_IMAGE_IO = Object.freeze({
-  readFile(path) {
-    return readFileSync(path);
+  readFile(path, maximumBytes) {
+    return readLocalImageBounded(path, maximumBytes);
   },
   stat(path) {
     return statSync(path);
@@ -38,19 +46,31 @@ function fail(code, message, details = undefined) {
   throw new ArtifactBuildError(code, message, details);
 }
 
+/**
+ * @param {string} body
+ * @param {{
+ *   sourceDirectory: string,
+ *   imageIo?: Partial<typeof DEFAULT_IMAGE_IO>,
+ *   resourceLimits?: typeof ARTIFACT_RESOURCE_LIMITS,
+ * }} options
+ */
 export function renderMarkdown(
   body,
   {
     sourceDirectory,
-    imageIo = DEFAULT_IMAGE_IO,
+    imageIo = {},
     resourceLimits = ARTIFACT_RESOURCE_LIMITS,
   },
 ) {
   const headings = [];
   const imageCache = new Map();
+  const selectedImageIo = {
+    stat: imageIo.stat ?? DEFAULT_IMAGE_IO.stat,
+    readFile: imageIo.readFile ?? DEFAULT_IMAGE_IO.readFile,
+  };
   const renderBudget = { embeddedImageBytes: 0 };
   let headingIndex = 0;
-  let allocateId;
+  const allocateId = createIdAllocator();
   const headingComponents = Object.fromEntries(
     Array.from({ length: 6 }, (_, index) => {
       const tagName = `h${index + 1}`;
@@ -93,13 +113,16 @@ export function renderMarkdown(
         if (/\blanguage-(?:mermaid|flow)\b/.test(className)) {
           const source = String(child.props.children || "").replace(/\n$/, "");
           flowIndex += 1;
-          allocateId ??= createIdAllocator(headings.map((heading) => heading.id));
           const titleId = allocateId(`flow-diagram-title-${flowIndex}`);
           const markerId = allocateId("flow-arrow");
           return React.createElement("div", {
             className: "flow-embed",
             dangerouslySetInnerHTML: {
-              __html: renderFlowDiagram(source, { markerId, titleId }),
+              __html: renderFlowDiagram(source, {
+                markerId,
+                titleId,
+                resourceLimits,
+              }),
             },
           });
         }
@@ -112,7 +135,7 @@ export function renderMarkdown(
     img({ alt, src, title }) {
       const image = resolveImage(src, sourceDirectory, {
         cache: imageCache,
-        imageIo,
+        imageIo: selectedImageIo,
         renderBudget,
         resourceLimits,
       });
@@ -155,7 +178,7 @@ export function renderMarkdown(
       {
         remarkPlugins: [
           remarkGfm,
-          createMarkdownAnalysisPlugin(headings, resourceLimits),
+          createMarkdownAnalysisPlugin(headings, resourceLimits, allocateId),
         ],
         components,
       },
@@ -166,13 +189,90 @@ export function renderMarkdown(
   return { articleHtml, headings };
 }
 
-function createIdAllocator(reservedIds) {
-  const used = new Set(reservedIds);
+function readLocalImageBounded(path, maximumBytes) {
+  let descriptor;
+  try {
+    descriptor = openSync(path, "r");
+    const before = fstatSync(descriptor);
+    if (!before.isFile()) {
+      fail("IMAGE_READ_FAILED", "Local Markdown image changed before reading", {
+        operation: "read",
+      });
+    }
+    if (
+      !Number.isSafeInteger(before.size) ||
+      before.size < 0 ||
+      before.size > maximumBytes
+    ) {
+      fail(
+        "RESOURCE_LIMIT_EXCEEDED",
+        "Local Markdown image exceeds its byte limit",
+      );
+    }
+
+    const chunks = [];
+    let totalBytes = 0;
+    while (totalBytes <= maximumBytes) {
+      const remaining = maximumBytes + 1 - totalBytes;
+      const chunk = Buffer.allocUnsafe(
+        Math.min(IMAGE_READ_CHUNK_BYTES, remaining),
+      );
+      const bytesRead = readSync(
+        descriptor,
+        chunk,
+        0,
+        chunk.length,
+        totalBytes,
+      );
+      if (bytesRead === 0) break;
+      totalBytes += bytesRead;
+      if (totalBytes > maximumBytes) {
+        fail(
+          "RESOURCE_LIMIT_EXCEEDED",
+          "Local Markdown image exceeds its byte limit",
+        );
+      }
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+
+    const after = fstatSync(descriptor);
+    if (
+      !Number.isSafeInteger(after.size) ||
+      after.size < 0 ||
+      after.size > maximumBytes
+    ) {
+      fail(
+        "RESOURCE_LIMIT_EXCEEDED",
+        "Local Markdown image exceeds its byte limit",
+      );
+    }
+    if (
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs ||
+      after.size !== totalBytes
+    ) {
+      fail("IMAGE_READ_FAILED", "Local Markdown image changed while reading", {
+        operation: "read",
+      });
+    }
+    return Buffer.concat(chunks, totalBytes);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function createIdAllocator() {
+  const used = new Set();
   return function allocateId(base) {
-    let candidate = base;
+    let candidate = truncateUtf8(base, MAX_HEADING_ID_BYTES);
     let suffix = 2;
     while (used.has(candidate)) {
-      candidate = `${base}-${suffix}`;
+      const suffixText = `-${suffix}`;
+      candidate = `${truncateUtf8(
+        base,
+        MAX_HEADING_ID_BYTES - Buffer.byteLength(suffixText, "utf8"),
+      )}${suffixText}`;
       suffix += 1;
     }
     used.add(candidate);
@@ -180,11 +280,22 @@ function createIdAllocator(reservedIds) {
   };
 }
 
-function createMarkdownAnalysisPlugin(headings, resourceLimits) {
+function truncateUtf8(value, maximumBytes) {
+  let result = "";
+  let bytes = 0;
+  for (const codePoint of String(value)) {
+    const codePointBytes = Buffer.byteLength(codePoint, "utf8");
+    if (bytes + codePointBytes > maximumBytes) break;
+    result += codePoint;
+    bytes += codePointBytes;
+  }
+  return result;
+}
+
+function createMarkdownAnalysisPlugin(headings, resourceLimits, allocateId) {
   return function markdownAnalysisPlugin() {
     return function analyze(tree) {
       const pending = [tree];
-      const seen = new Map();
       let nodes = 0;
       while (pending.length > 0) {
         const node = pending.pop();
@@ -198,12 +309,10 @@ function createMarkdownAnalysisPlugin(headings, resourceLimits) {
         if (node?.type === "heading") {
           const text = markdownNodeText(node).trim();
           const base = slugify(text);
-          const count = seen.get(base) || 0;
-          seen.set(base, count + 1);
           headings.push({
             level: node.depth,
             text,
-            id: count === 0 ? base : `${base}-${count + 1}`,
+            id: allocateId(base),
           });
         }
         if (Array.isArray(node?.children)) {
@@ -320,8 +429,14 @@ function resolveImage(
   reserveEmbeddedImage(renderBudget, resourceLimits, projectedBytes);
   let bytes;
   try {
-    bytes = imageIo.readFile(path);
-  } catch {
+    bytes = imageIo.readFile(path, MAX_LOCAL_IMAGE_BYTES);
+  } catch (cause) {
+    if (
+      cause instanceof ArtifactBuildError &&
+      cause.code === "RESOURCE_LIMIT_EXCEEDED"
+    ) {
+      throw cause;
+    }
     fail("IMAGE_READ_FAILED", "Unable to read a local Markdown image", {
       operation: "read",
     });
