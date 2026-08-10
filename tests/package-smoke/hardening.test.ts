@@ -127,6 +127,7 @@ describe("package boundary hardening", () => {
       "installedBinaryPlan",
       "npmExecutionPlan",
       "probeWindowsInstalledShim",
+      "runSmokeCommand",
       "sanitizedEnvironment",
       "assertPackedManifestMatches",
       "supervisedCommandPlan",
@@ -490,15 +491,126 @@ describe("package boundary hardening", () => {
       return killer;
     };
     const record = { rootPid: 4242, terminating: false, terminationPromise: undefined };
+    const activeRecords = new Set([record]);
     await Promise.all([
-      smoke.terminateWindowsSupervisor(record, { spawnProcess }),
-      smoke.terminateWindowsSupervisor(record, { spawnProcess }),
+      smoke.terminateWindowsSupervisor(record, { activeRecords, spawnProcess }),
+      smoke.terminateWindowsSupervisor(record, { activeRecords, spawnProcess }),
     ]);
     expect(calls).toEqual([{
       executable: "taskkill",
       args: ["/pid", "4242", "/t", "/f"],
     }]);
     expect(record.terminating).toBe(true);
+    expect(activeRecords.has(record)).toBe(false);
+  });
+
+  it.each([
+    ["spawn error", (killer: EventEmitter) => killer.emit("error", new Error("denied"))],
+    ["nonzero exit", (killer: EventEmitter) => killer.emit("close", 1)],
+  ])("retains Windows supervisor ownership after taskkill %s", async (_label, finish) => {
+    const record = { rootPid: 4242, terminating: false, terminationPromise: undefined };
+    const activeRecords = new Set([record]);
+    const spawnProcess = () => {
+      const killer = new EventEmitter();
+      queueMicrotask(() => finish(killer));
+      return killer;
+    };
+    await expect(smoke.terminateWindowsSupervisor(record, {
+      activeRecords,
+      spawnProcess,
+      timeoutMs: 50,
+    })).rejects.toThrow(/taskkill/iu);
+    expect(activeRecords.has(record)).toBe(true);
+    expect(record.terminating).toBe(false);
+    expect(record.terminationPromise).toBeUndefined();
+  });
+
+  it("times out taskkill teardown and retains the active supervisor record", async () => {
+    const record = { rootPid: 4242, terminating: false, terminationPromise: undefined };
+    const activeRecords = new Set([record]);
+    let killerWasStopped = false;
+    const neverClosingKiller = new EventEmitter() as EventEmitter & { kill: () => void };
+    neverClosingKiller.kill = () => {
+      killerWasStopped = true;
+    };
+    const teardown = smoke.terminateWindowsSupervisor(record, {
+      activeRecords,
+      spawnProcess: () => neverClosingKiller,
+      timeoutMs: 20,
+    });
+    await expect(Promise.race([
+      teardown,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("outer timeout")), 250)),
+    ])).rejects.toThrow(/taskkill.*timed out/iu);
+    expect(killerWasStopped).toBe(true);
+    expect(activeRecords.has(record)).toBe(true);
+    expect(record.terminationPromise).toBeUndefined();
+  });
+
+  it("retries a failed owned teardown then remains idempotent after success", async () => {
+    const record = { rootPid: 4242, terminating: false, terminationPromise: undefined };
+    const activeRecords = new Set([record]);
+    let attempts = 0;
+    const spawnProcess = () => {
+      attempts += 1;
+      const killer = new EventEmitter();
+      queueMicrotask(() => {
+        if (attempts === 1) killer.emit("close", 1);
+        else killer.emit("close", 0);
+      });
+      return killer;
+    };
+    await expect(smoke.terminateWindowsSupervisor(record, {
+      activeRecords,
+      spawnProcess,
+      timeoutMs: 50,
+    })).rejects.toThrow();
+    await smoke.terminateWindowsSupervisor(record, { activeRecords, spawnProcess, timeoutMs: 50 });
+    await smoke.terminateWindowsSupervisor(record, { activeRecords, spawnProcess, timeoutMs: 50 });
+    expect(attempts).toBe(2);
+    expect(activeRecords.has(record)).toBe(false);
+  });
+
+  it("retains ownership evidence without taskkill after the supervisor PID is lost", async () => {
+    const record = {
+      ownershipLost: true,
+      rootPid: 4242,
+      terminating: false,
+      terminationPromise: undefined,
+    };
+    const activeRecords = new Set([record]);
+    let spawnCalls = 0;
+    await expect(smoke.terminateWindowsSupervisor(record, {
+      activeRecords,
+      spawnProcess: () => {
+        spawnCalls += 1;
+        const killer = new EventEmitter();
+        queueMicrotask(() => killer.emit("close", 0));
+        return killer;
+      },
+      timeoutMs: 50,
+    })).rejects.toThrow(/ownership.*lost/iu);
+    expect(spawnCalls).toBe(0);
+    expect(activeRecords.has(record)).toBe(true);
+  });
+
+  it("settles the command promise when injected teardown fails", async () => {
+    const commandPromise = smoke.runSmokeCommand(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      {
+        platform: "linux",
+        terminateRecords: async ([record]: Array<Record<string, any>>) => {
+          record.child.kill("SIGKILL");
+          throw new Error("injected teardown failure");
+        },
+        timeout: 20,
+      },
+    );
+    await expect(Promise.race([
+      commandPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("outer timeout")), 500)),
+    ])).rejects.toThrow("injected teardown failure");
   });
 
   it("keeps a persistent supervisor PID owned after its command leader exits", async () => {
@@ -555,6 +667,58 @@ process.stdout.write(JSON.stringify({ grandchildPid: child.pid }) + "\\n");`;
           else process.kill(-supervisor.pid!, "SIGKILL");
         } catch {
           // The owned supervisor group has already exited.
+        }
+      }
+    }
+  }, 20_000);
+
+  it("cleans its owned command tree when the parent IPC disconnects", async () => {
+    const actualSource = `const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+process.stdout.write(JSON.stringify({ childPid: process.pid, grandchildPid: child.pid }) + "\\n");
+setInterval(() => {}, 1000);`;
+    const plan = smoke.supervisedCommandPlan({
+      args: ["-e", actualSource],
+      executable: process.execPath,
+      nodeExecutable: process.execPath,
+      platform: "win32",
+    });
+    const supervisor = spawn(plan.executable, plan.args, {
+      detached: process.platform !== "win32",
+      env: smoke.sanitizedEnvironment(),
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    let stdout = "";
+    supervisor.stdout!.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    const supervisorExit = new Promise<void>((resolve, reject) => {
+      supervisor.once("error", reject);
+      supervisor.once("exit", () => resolve());
+    });
+    let owned: { childPid: number; grandchildPid: number } | undefined;
+    try {
+      await waitUntil(() => stdout.endsWith("\n"));
+      owned = JSON.parse(stdout) as { childPid: number; grandchildPid: number };
+      supervisor.disconnect();
+      await Promise.race([
+        supervisorExit,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("disconnect timeout")), 1500)),
+      ]);
+      await waitUntil(() => !processExists(owned!.childPid));
+      await waitUntil(() => !processExists(owned!.grandchildPid));
+    } finally {
+      if (supervisor.exitCode === null && supervisor.signalCode === null) {
+        try {
+          if (process.platform === "win32") {
+            spawn("taskkill", ["/pid", String(supervisor.pid), "/t", "/f"], {
+              stdio: "ignore",
+            });
+          } else {
+            process.kill(-supervisor.pid!, "SIGKILL");
+          }
+        } catch {
+          // The exact owned supervisor group is already gone.
         }
       }
     }

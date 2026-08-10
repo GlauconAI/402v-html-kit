@@ -713,6 +713,46 @@ command.once("close", (status, signal) => {
   if (process.stderr.writableNeedDrain) pending.push(new Promise((resolve) => process.stderr.once("drain", resolve)));
   Promise.all(pending).then(() => report({ status, signal, type: "result" }));
 });
+process.once("disconnect", () => {
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-process.pid, "SIGKILL");
+    } catch {
+      try { command.kill("SIGKILL"); } catch {}
+      process.exit(1);
+    }
+    return;
+  }
+  if (command.pid === undefined || command.exitCode !== null || command.signalCode !== null) {
+    process.exit(0);
+  }
+  let settled = false;
+  let killer;
+  const finish = (successful) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    if (!successful) {
+      try { killer?.kill(); } catch {}
+      try { command.kill("SIGKILL"); } catch {}
+    }
+    process.exit(successful ? 0 : 1);
+  };
+  const timer = setTimeout(() => finish(false), 2000);
+  timer.unref();
+  try {
+    killer = spawn("taskkill", ["/pid", String(command.pid), "/t", "/f"], {
+      env: process.env,
+      shell: false,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    killer.once("error", () => finish(false));
+    killer.once("close", (status) => finish(status === 0));
+  } catch {
+    finish(false);
+  }
+});
 setInterval(() => {}, 1000);`;
 
 export function supervisedCommandPlan({
@@ -764,35 +804,87 @@ async function signalProcessTree(snapshot, signal) {
   }
 }
 
-export function terminateWindowsSupervisor(record, { spawnProcess = spawn } = {}) {
+export function terminateWindowsSupervisor(record, {
+  activeRecords = activeProcessTrees,
+  spawnProcess = spawn,
+  timeoutMs = 2000,
+} = {}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10_000) {
+    fail("Windows supervisor teardown timeout must be between 1 and 10000 milliseconds");
+  }
+  if (record.teardownSucceeded === true) return record.terminationPromise ?? Promise.resolve();
+  if (record.ownershipLost === true) {
+    return Promise.reject(new Error(
+      `Windows supervisor PID ${record.rootPid} ownership was lost before verified teardown`,
+    ));
+  }
+  if (record.terminationPromise !== undefined) return record.terminationPromise;
   record.terminating = true;
-  record.terminationPromise ??= new Promise((resolvePromise) => {
-    const killer = spawnProcess(
-      "taskkill",
-      ["/pid", String(record.rootPid), "/t", "/f"],
-      {
-        env: sanitizedEnvironment(),
-        stdio: "ignore",
-      },
-    );
-    killer.once("error", resolvePromise);
-    killer.once("close", resolvePromise);
+  let attempt;
+  const teardown = new Promise((resolvePromise, rejectPromise) => {
+    let killer;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error === undefined) resolvePromise();
+      else rejectPromise(error);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        killer?.kill?.();
+      } catch {
+        // Stopping the exact taskkill helper is best-effort after its deadline.
+      }
+      rejectPromise(new Error(`taskkill timed out for owned supervisor PID ${record.rootPid}`));
+    }, timeoutMs);
+    timer.unref?.();
+    try {
+      killer = spawnProcess(
+        "taskkill",
+        ["/pid", String(record.rootPid), "/t", "/f"],
+        {
+          env: sanitizedEnvironment(),
+          stdio: "ignore",
+        },
+      );
+      killer.once("error", (error) => finish(new Error(
+        `taskkill could not start for owned supervisor PID ${record.rootPid}: ${error.message}`,
+      )));
+      killer.once("close", (status) => finish(
+        status === 0
+          ? undefined
+          : new Error(`taskkill exited ${String(status)} for owned supervisor PID ${record.rootPid}`),
+      ));
+    } catch (error) {
+      finish(new Error(
+        `taskkill could not start for owned supervisor PID ${record.rootPid}: ${error.message}`,
+      ));
+    }
   });
-  return record.terminationPromise;
+  attempt = teardown.then(() => {
+    record.teardownSucceeded = true;
+    activeRecords.delete(record);
+  }, (error) => {
+    record.terminating = false;
+    throw error;
+  }).finally(() => {
+    if (record.teardownSucceeded !== true && record.terminationPromise === attempt) {
+      record.terminationPromise = undefined;
+    }
+  });
+  record.terminationPromise = attempt;
+  return attempt;
 }
 
 async function terminateProcessTrees(records) {
   const uniqueRecords = [...new Set(records)];
   if (uniqueRecords.length === 0) return;
   if (process.platform === "win32") {
-    for (const record of uniqueRecords) {
-      const termination = terminateWindowsSupervisor(record);
-      if (record.terminationCleanupAttached !== true) {
-        record.terminationCleanupAttached = true;
-        record.terminationPromise = termination.finally(() => activeProcessTrees.delete(record));
-      }
-    }
-    await Promise.all(uniqueRecords.map((record) => record.terminationPromise));
+    await Promise.all(uniqueRecords.map((record) => terminateWindowsSupervisor(record)));
     return;
   }
   const snapshots = uniqueRecords.map((record) => ({
@@ -817,10 +909,11 @@ async function command(executable, args, options = {}) {
   if (remaining <= 0) throw new SmokeExitError("Package smoke global deadline exceeded", 124);
   const timeout = Math.max(1, Math.min(options.timeout ?? 120_000, remaining));
   return await new Promise((resolvePromise, rejectPromise) => {
-    const execution = supervisedCommandPlan({ args, executable });
+    const platform = options.platform ?? process.platform;
+    const execution = supervisedCommandPlan({ args, executable, platform });
     const child = spawn(execution.executable, execution.args, {
       cwd: options.cwd ?? workspaceRoot,
-      detached: process.platform !== "win32",
+      detached: platform !== "win32",
       env: sanitizedEnvironment(process.env, {
         NO_COLOR: "1",
         ...options.env,
@@ -835,7 +928,6 @@ async function command(executable, args, options = {}) {
       rootPid: child.pid,
       supervised: execution.supervised,
       terminating: false,
-      terminationCleanupAttached: false,
       terminationPromise: undefined,
     };
     activeProcessTrees.add(record);
@@ -847,9 +939,17 @@ async function command(executable, args, options = {}) {
     let outputLimited = false;
     let supervisedResult;
     let supervisorError;
+    let commandTerminationPromise;
+    let teardownError;
     const terminateRecord = () => {
-      record.terminationPromise ??= terminateProcessTrees([record]);
-      return record.terminationPromise;
+      if (commandTerminationPromise === undefined) {
+        commandTerminationPromise = (options.terminateRecords ?? terminateProcessTrees)([record]);
+        void commandTerminationPromise.catch((error) => {
+          teardownError = error;
+          rejectPromise(error);
+        });
+      }
+      return commandTerminationPromise;
     };
     const capture = (chunks) => (chunk) => {
       if (outputLimited) return;
@@ -906,6 +1006,7 @@ async function command(executable, args, options = {}) {
     child.once("close", async (status, signal) => {
       clearTimeout(timer);
       if (!record.terminating) {
+        if (execution.supervised) record.ownershipLost = true;
         let processTreeSurvives = false;
         if (!execution.supervised) {
           try {
@@ -915,9 +1016,15 @@ async function command(executable, args, options = {}) {
             // This exact process group has exited completely.
           }
         }
-        if (!processTreeSurvives) activeProcessTrees.delete(record);
+        if (!execution.supervised && !processTreeSurvives) activeProcessTrees.delete(record);
       }
-      if (record.terminationPromise !== undefined) await record.terminationPromise;
+      if (commandTerminationPromise !== undefined) {
+        try {
+          await commandTerminationPromise;
+        } catch (error) {
+          teardownError = error;
+        }
+      }
       const result = {
         status: supervisedResult?.status ?? status,
         signal: supervisedResult?.signal ?? signal,
@@ -926,6 +1033,8 @@ async function command(executable, args, options = {}) {
       };
       if (shutdownError !== undefined) {
         rejectPromise(shutdownError);
+      } else if (teardownError !== undefined) {
+        rejectPromise(teardownError);
       } else if (timedOut || outputLimited) {
         rejectPromise(new SmokeExitError(
           `${executable} exceeded its ${outputLimited ? "output limit" : "timeout"}`,
@@ -945,6 +1054,10 @@ async function command(executable, args, options = {}) {
       }
     });
   });
+}
+
+export async function runSmokeCommand(executable, args, options = {}) {
+  return await command(executable, args, options);
 }
 
 async function jsonCommand(executable, args, cwd, plan) {
@@ -1471,7 +1584,7 @@ async function runPackSmoke() {
   };
   const requestShutdown = (message, exitCode) => {
     if (shutdownError === undefined) shutdownError = new SmokeExitError(message, exitCode);
-    void terminateActiveChildren();
+    void terminateActiveChildren().catch(() => {});
   };
   const onSigint = () => requestShutdown("Package smoke interrupted by SIGINT", 130);
   const onSigterm = () => requestShutdown("Package smoke interrupted by SIGTERM", 143);
