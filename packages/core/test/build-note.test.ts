@@ -28,6 +28,7 @@ import type {
   ThemeRenderResult,
 } from "../src/index.mjs";
 import * as core from "../src/index.mjs";
+import { renderMarkdown } from "../src/render-markdown.mjs";
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require("jsdom");
@@ -515,11 +516,149 @@ describe("buildNote", () => {
       dom.window.close();
     }
 
-    expect(returnedHeadings).toEqual([]);
+    expect(returnedHeadings).toEqual([
+      { id: "flow-diagram-title-1", level: 1, text: "Flow Diagram Title 1" },
+      { id: "flow-arrow", level: 1, text: "Flow Arrow" },
+      { id: "flow-diagram-title-2", level: 1, text: "Flow Diagram Title 2" },
+    ]);
     expect(verifyArtifactHtml(readFileSync(outputPath, "utf8"))).toMatchObject({
       ok: true,
       contractVersion: 2,
     });
+  });
+
+  it("uses one rendered heading contract for rich, nested, and setext Markdown", async () => {
+    const root = temporaryRoot();
+    const inputPath = join(root, "canonical-headings.md");
+    const outputPath = join(root, "canonical-headings.html");
+    writeFileSync(
+      inputPath,
+      [
+        "---",
+        "title: Canonical headings",
+        "---",
+        "",
+        "# [Linked](https://example.com) &amp; Entity",
+        "",
+        "Repeat",
+        "======",
+        "",
+        "Repeat",
+        "======",
+        "",
+        "> # Quote",
+        "",
+        "> # Quote",
+        "",
+        "## ![Diagram][asset] Overview",
+        "",
+        "[asset]: missing.png",
+        "",
+        "~~~",
+        "# Ghost",
+        "~~~",
+      ].join("\n"),
+    );
+    let articleHtml = "";
+    let headings: ThemeRenderInput["content"]["headings"] = [];
+
+    await buildNote({
+      inputPath,
+      outputPath,
+      theme: safeTheme((input) => {
+        articleHtml = input.content.articleHtml ?? "";
+        headings = input.content.headings ?? [];
+        return {
+          lang: input.metadata.lang,
+          styles: "",
+          bodyHtml: `<main>${articleHtml}</main>`,
+        };
+      }),
+    });
+
+    expect(headings).toEqual([
+      { id: "linked-entity", level: 1, text: "Linked & Entity" },
+      { id: "repeat", level: 1, text: "Repeat" },
+      { id: "repeat-2", level: 1, text: "Repeat" },
+      { id: "quote", level: 1, text: "Quote" },
+      { id: "quote-2", level: 1, text: "Quote" },
+      { id: "diagram-overview", level: 2, text: "Diagram Overview" },
+    ]);
+    const dom = new JSDOM(articleHtml);
+    try {
+      const rendered = [...dom.window.document.querySelectorAll("h1[id],h2[id]")].map(
+        (heading) => ({ id: heading.id, text: heading.textContent }),
+      );
+      expect(rendered).toEqual(headings.map(({ id, text }) => ({ id, text })));
+      expect(new Set(rendered.map(({ id }) => id)).size).toBe(rendered.length);
+      expect(articleHtml).toContain("<pre><code># Ghost");
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  it("caches local image encoding while charging every embedded reference", () => {
+    const bytes = Buffer.from([0x01, 0x02, 0x03]);
+    let stats = 0;
+    let reads = 0;
+    const options = {
+      sourceDirectory: "/virtual/note",
+      imageIo: {
+        stat(path: string) {
+          stats += 1;
+          expect(path).toBe("/virtual/note/pixel.png");
+          return { isFile: () => true, size: bytes.length };
+        },
+        readFile(path: string) {
+          reads += 1;
+          expect(path).toBe("/virtual/note/pixel.png");
+          return bytes;
+        },
+      },
+      resourceLimits: {
+        ...ARTIFACT_RESOURCE_LIMITS,
+        artifactBytes: 52,
+      },
+    };
+
+    const rendered = renderMarkdown(
+      "![first](pixel.png)\n\n![second](pixel.png)",
+      options,
+    );
+
+    expect(stats).toBe(1);
+    expect(reads).toBe(1);
+    expect(rendered.articleHtml.match(/data:image\/png;base64,AQID/g)).toHaveLength(2);
+    expect(() =>
+      renderMarkdown(
+        "![first](pixel.png)\n\n![second](pixel.png)",
+        {
+          ...options,
+          resourceLimits: {
+            ...ARTIFACT_RESOURCE_LIMITS,
+            artifactBytes: 51,
+          },
+        },
+      )
+    ).toThrowError(expect.objectContaining({
+      name: "ArtifactBuildError",
+      code: "RESOURCE_LIMIT_EXCEEDED",
+    }));
+  });
+
+  it("rejects an excessive Markdown AST before rendering it", () => {
+    expect(() =>
+      renderMarkdown("# Heading\n\nBody", {
+        sourceDirectory: "/virtual/note",
+        resourceLimits: {
+          ...ARTIFACT_RESOURCE_LIMITS,
+          canonicalJsonNodes: 4,
+        },
+      })
+    ).toThrowError(expect.objectContaining({
+      name: "ArtifactBuildError",
+      code: "RESOURCE_LIMIT_EXCEEDED",
+    }));
   });
 
   it.each([
@@ -630,6 +769,89 @@ describe("buildNote", () => {
     expect(existsSync(outputPath)).toBe(false);
   });
 
+  it("reports malformed frontmatter without leaking its source", async () => {
+    const root = temporaryRoot();
+    const inputPath = join(root, "frontmatter.md");
+    const outputPath = join(root, "frontmatter.html");
+    writeFileSync(inputPath, "---\ntitle: PRIVATE_FRONTMATTER\n# Missing close");
+
+    const error = await expectError(
+      () => buildNote({ inputPath, outputPath, theme: safeTheme() }),
+      "INVALID_MARKDOWN",
+    );
+
+    expect(error.details).toEqual({ section: "frontmatter" });
+    expect(JSON.stringify(error.toJSON())).not.toContain("PRIVATE_FRONTMATTER");
+    expect(error.cause).toBeUndefined();
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("reports an invalid flow by safe line number without source leakage", async () => {
+    const root = temporaryRoot();
+    const inputPath = join(root, "flow.md");
+    const outputPath = join(root, "flow.html");
+    writeFileSync(
+      inputPath,
+      "# Flow\n\n```flow\nflowchart LR\nPRIVATE_FLOW_SOURCE\n```",
+    );
+
+    const error = await expectError(
+      () => buildNote({ inputPath, outputPath, theme: safeTheme() }),
+      "INVALID_FLOW_DIAGRAM",
+    );
+
+    expect(error.details).toEqual({ line: 2 });
+    expect(JSON.stringify(error.toJSON())).not.toContain("PRIVATE_FLOW_SOURCE");
+    expect(error.cause).toBeUndefined();
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("reports malformed image path encoding with sanitized details", async () => {
+    const root = temporaryRoot();
+    const inputPath = join(root, "image-uri.md");
+    const outputPath = join(root, "image-uri.html");
+    writeFileSync(inputPath, "# Image\n\n![private](PRIVATE_%ZZ.png)");
+
+    const error = await expectError(
+      () => buildNote({ inputPath, outputPath, theme: safeTheme() }),
+      "INVALID_IMAGE_SOURCE",
+    );
+
+    expect(error.details).toEqual({ operation: "decode" });
+    expect(JSON.stringify(error.toJSON())).not.toContain("PRIVATE_");
+    expect(error.cause).toBeUndefined();
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it("sanitizes a local image read race after successful stat", () => {
+    let caught: unknown;
+    try {
+      renderMarkdown("![private](race.png)", {
+        sourceDirectory: "/PRIVATE_DIRECTORY",
+        imageIo: {
+          stat() {
+            return { isFile: () => true, size: 3 };
+          },
+          readFile() {
+            throw new Error("PRIVATE_DIRECTORY/race.png disappeared");
+          },
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ArtifactBuildError);
+    expect(caught).toMatchObject({
+      code: "IMAGE_READ_FAILED",
+      details: { operation: "read" },
+    });
+    expect((caught as Error).cause).toBeUndefined();
+    expect(JSON.stringify((caught as ArtifactBuildError).toJSON())).not.toContain(
+      "PRIVATE_",
+    );
+  });
+
   it("keeps core note building free of shell, CSS, site, and theme fallback ownership", () => {
     const buildSource = readFileSync(new URL("../src/build-note.mjs", import.meta.url), "utf8");
     const renderSource = readFileSync(new URL("../src/render-markdown.mjs", import.meta.url), "utf8");
@@ -638,5 +860,20 @@ describe("buildNote", () => {
     expect(source).not.toMatch(/node:child_process|spawn|execFile|execSync/);
     expect(source).not.toMatch(/\.css["']|theme-402v|@402v\/theme|site\/|public\//);
     expect(source).not.toMatch(/import\s*\(/);
+  });
+
+  it("reuses the assembly verification result instead of parsing the document twice", () => {
+    const buildSource = readFileSync(
+      new URL("../src/build-note.mjs", import.meta.url),
+      "utf8",
+    );
+    const assemblySource = readFileSync(
+      new URL("../src/document-v2.mjs", import.meta.url),
+      "utf8",
+    );
+
+    expect(buildSource).toContain("assembleArtifactV2WithVerification");
+    expect(buildSource).not.toContain("verifyArtifactHtml");
+    expect(assemblySource.match(/verifyArtifactHtml\(/g)).toHaveLength(1);
   });
 });

@@ -91,7 +91,7 @@ function normalizeConsumerScripts(value, mode) {
   });
 }
 
-export function assembleArtifactV2(input) {
+export function assembleArtifactV2WithVerification(input) {
   requireRecord(input, "Artifact input");
   const mode = input.mode;
   if (mode !== "note" && mode !== "interactive") {
@@ -162,6 +162,10 @@ export function assembleArtifactV2(input) {
   if (Buffer.byteLength(html, "utf8") > ARTIFACT_RESOURCE_LIMITS.artifactBytes) {
     fail("RESOURCE_LIMIT_EXCEEDED", "Artifact exceeds the HTML byte limit");
   }
-  verifyArtifactHtml(html);
-  return html;
+  const verification = verifyArtifactHtml(html);
+  return { html, verification };
+}
+
+export function assembleArtifactV2(input) {
+  return assembleArtifactV2WithVerification(input).html;
 }

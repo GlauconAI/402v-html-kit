@@ -2,10 +2,12 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { extname, isAbsolute, resolve } from "node:path";
 
+import { ArtifactBuildError } from "./errors.mjs";
 import { renderFlowDiagram } from "./flow.mjs";
+import { ARTIFACT_RESOURCE_LIMITS } from "./resource-limits.mjs";
 
 const IMAGE_MIME_TYPES = new Map([
   [".avif", "image/avif"],
@@ -16,16 +18,58 @@ const IMAGE_MIME_TYPES = new Map([
   [".svg", "image/svg+xml"],
   [".webp", "image/webp"],
 ]);
+const MAX_LOCAL_IMAGE_BYTES = 10 * 1024 * 1024;
+/**
+ * @type {Readonly<{
+ *   readFile(path: string): Buffer,
+ *   stat(path: string): { isFile(): boolean, size: number },
+ * }>}
+ */
+const DEFAULT_IMAGE_IO = Object.freeze({
+  readFile(path) {
+    return readFileSync(path);
+  },
+  stat(path) {
+    return statSync(path);
+  },
+});
 
-export function renderMarkdown(body, { sourceDirectory }) {
-  const headings = extractHeadings(body);
-  const headingIds = [...headings];
-  const allocateId = createIdAllocator(discoverRenderedHeadingIds(body, headings));
+function fail(code, message, details = undefined) {
+  throw new ArtifactBuildError(code, message, details);
+}
+
+export function renderMarkdown(
+  body,
+  {
+    sourceDirectory,
+    imageIo = DEFAULT_IMAGE_IO,
+    resourceLimits = ARTIFACT_RESOURCE_LIMITS,
+  },
+) {
+  const headings = [];
+  const imageCache = new Map();
+  const renderBudget = { embeddedImageBytes: 0 };
+  let headingIndex = 0;
+  let allocateId;
+  const headingComponents = Object.fromEntries(
+    Array.from({ length: 6 }, (_, index) => {
+      const tagName = `h${index + 1}`;
+      return [
+        tagName,
+        function Heading({ children }) {
+          const heading = headings[headingIndex];
+          headingIndex += 1;
+          if (heading === undefined || heading.level !== index + 1) {
+            throw new Error("Markdown heading analysis diverged from rendering");
+          }
+          return React.createElement(tagName, { id: heading.id }, children);
+        },
+      ];
+    }),
+  );
   let flowIndex = 0;
   const components = {
-    h1: headingComponent("h1", headingIds),
-    h2: headingComponent("h2", headingIds),
-    h3: headingComponent("h3", headingIds),
+    ...headingComponents,
     blockquote({ children }) {
       const match = textContent(children)
         .trimStart()
@@ -49,6 +93,7 @@ export function renderMarkdown(body, { sourceDirectory }) {
         if (/\blanguage-(?:mermaid|flow)\b/.test(className)) {
           const source = String(child.props.children || "").replace(/\n$/, "");
           flowIndex += 1;
+          allocateId ??= createIdAllocator(headings.map((heading) => heading.id));
           const titleId = allocateId(`flow-diagram-title-${flowIndex}`);
           const markerId = allocateId("flow-arrow");
           return React.createElement("div", {
@@ -65,7 +110,12 @@ export function renderMarkdown(body, { sourceDirectory }) {
       return React.createElement("code", { className }, children);
     },
     img({ alt, src, title }) {
-      const image = resolveImage(src, sourceDirectory);
+      const image = resolveImage(src, sourceDirectory, {
+        cache: imageCache,
+        imageIo,
+        renderBudget,
+        resourceLimits,
+      });
       if (image.kind === "passive") {
         return React.createElement(
           "a",
@@ -102,32 +152,18 @@ export function renderMarkdown(body, { sourceDirectory }) {
   const articleHtml = renderToStaticMarkup(
     React.createElement(
       Markdown,
-      { remarkPlugins: [remarkGfm], components },
+      {
+        remarkPlugins: [
+          remarkGfm,
+          createMarkdownAnalysisPlugin(headings, resourceLimits),
+        ],
+        components,
+      },
       body,
     ),
   );
 
   return { articleHtml, headings };
-}
-
-function discoverRenderedHeadingIds(body, headings) {
-  const renderedIds = [];
-  const headingIds = [...headings];
-  const recordId = (id) => renderedIds.push(id);
-  const components = {
-    h1: headingComponent("h1", headingIds, recordId),
-    h2: headingComponent("h2", headingIds, recordId),
-    h3: headingComponent("h3", headingIds, recordId),
-  };
-
-  renderToStaticMarkup(
-    React.createElement(
-      Markdown,
-      { remarkPlugins: [remarkGfm], components },
-      body,
-    ),
-  );
-  return renderedIds;
 }
 
 function createIdAllocator(reservedIds) {
@@ -144,83 +180,166 @@ function createIdAllocator(reservedIds) {
   };
 }
 
-function headingComponent(tagName, headingIds, onHeading = undefined) {
-  return function Heading({ children }) {
-    const text = textContent(children);
-    const nextIndex = headingIds.findIndex(
-      (heading) => heading.level === Number(tagName.slice(1)) &&
-        heading.text === text,
-    );
-    const heading =
-      nextIndex >= 0
-        ? headingIds.splice(nextIndex, 1)[0]
-        : { id: slugify(text) };
-    onHeading?.(heading.id);
-    return React.createElement(tagName, { id: heading.id }, children);
+function createMarkdownAnalysisPlugin(headings, resourceLimits) {
+  return function markdownAnalysisPlugin() {
+    return function analyze(tree) {
+      const pending = [tree];
+      const seen = new Map();
+      let nodes = 0;
+      while (pending.length > 0) {
+        const node = pending.pop();
+        nodes += 1;
+        if (nodes > resourceLimits.canonicalJsonNodes) {
+          fail(
+            "RESOURCE_LIMIT_EXCEEDED",
+            "Markdown input exceeds the syntax node limit",
+          );
+        }
+        if (node?.type === "heading") {
+          const text = markdownNodeText(node).trim();
+          const base = slugify(text);
+          const count = seen.get(base) || 0;
+          seen.set(base, count + 1);
+          headings.push({
+            level: node.depth,
+            text,
+            id: count === 0 ? base : `${base}-${count + 1}`,
+          });
+        }
+        if (Array.isArray(node?.children)) {
+          for (let index = node.children.length - 1; index >= 0; index -= 1) {
+            pending.push(node.children[index]);
+          }
+        }
+      }
+    };
   };
 }
 
-function extractHeadings(markdown) {
-  const seen = new Map();
-  const headings = [];
-  let insideFence = false;
-
-  for (const line of markdown.split("\n")) {
-    if (/^```/.test(line.trim())) {
-      insideFence = !insideFence;
-      continue;
-    }
-    if (insideFence) continue;
-
-    const match = line.match(/^(#{1,3})\s+(.+?)\s*#*\s*$/);
-    if (!match) continue;
-    const level = match[1].length;
-    const text = match[2].replace(/[*_`[\]]/g, "").trim();
-    const base = slugify(text);
-    const count = seen.get(base) || 0;
-    seen.set(base, count + 1);
-    headings.push({
-      level,
-      text,
-      id: count === 0 ? base : `${base}-${count + 1}`,
-    });
+function markdownNodeText(node) {
+  if (node === null || typeof node !== "object") return "";
+  if (node.type === "image" || node.type === "imageReference") {
+    return typeof node.alt === "string" ? node.alt : "";
   }
-
-  return headings;
+  if (
+    (node.type === "text" || node.type === "inlineCode" || node.type === "html") &&
+    typeof node.value === "string"
+  ) {
+    return node.value;
+  }
+  if (!Array.isArray(node.children)) return "";
+  return node.children.map(markdownNodeText).join("");
 }
 
-function resolveImage(src, sourceDirectory) {
-  if (!src) throw new Error("Image source is empty or unsafe");
-  if (/^data:image\//i.test(src)) return { kind: "embedded", src };
+function reserveEmbeddedImage(renderBudget, resourceLimits, bytes) {
+  renderBudget.embeddedImageBytes += bytes;
+  if (renderBudget.embeddedImageBytes > resourceLimits.artifactBytes) {
+    fail(
+      "RESOURCE_LIMIT_EXCEEDED",
+      "Embedded Markdown images exceed the artifact byte limit",
+    );
+  }
+}
+
+function dataUriBytes(mime, bytes) {
+  return Buffer.byteLength(`data:${mime};base64,`, "utf8") +
+    4 * Math.ceil(bytes / 3);
+}
+
+function resolveImage(
+  src,
+  sourceDirectory,
+  { cache, imageIo, renderBudget, resourceLimits },
+) {
+  if (!src) {
+    fail("INVALID_IMAGE_SOURCE", "Markdown image source is empty", {
+      operation: "validate",
+    });
+  }
+  if (/^data:image\//i.test(src)) {
+    reserveEmbeddedImage(
+      renderBudget,
+      resourceLimits,
+      Buffer.byteLength(src, "utf8"),
+    );
+    return { kind: "embedded", src };
+  }
   if (/^https?:\/\//i.test(src) || src.startsWith("#")) {
     return { kind: "passive", href: src };
   }
   if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(src) || src.startsWith("//")) {
-    throw new Error("Unsupported image URL scheme");
+    fail("INVALID_IMAGE_SOURCE", "Markdown image URL scheme is unsupported", {
+      operation: "validate",
+    });
   }
-  const decoded = decodeURIComponent(src);
+  let decoded;
+  try {
+    decoded = decodeURIComponent(src);
+  } catch {
+    fail("INVALID_IMAGE_SOURCE", "Markdown image path encoding is invalid", {
+      operation: "decode",
+    });
+  }
   const path = isAbsolute(decoded)
     ? decoded
     : resolve(sourceDirectory, decoded);
 
-  if (!existsSync(path) || !statSync(path).isFile()) {
+  const cached = cache.get(path);
+  if (cached !== undefined) {
+    reserveEmbeddedImage(renderBudget, resourceLimits, cached.byteLength);
+    return { kind: "embedded", src: cached.src };
+  }
+
+  let stats;
+  try {
+    stats = imageIo.stat(path);
+  } catch (cause) {
+    if (cause?.code === "ENOENT") return { kind: "passive", href: src };
+    fail("IMAGE_READ_FAILED", "Unable to inspect a local Markdown image", {
+      operation: "stat",
+    });
+  }
+  if (!stats.isFile()) {
     return { kind: "passive", href: src };
   }
 
   const extension = extname(path).toLowerCase();
   const mime = IMAGE_MIME_TYPES.get(extension);
   if (!mime) {
-    throw new Error(`Unsupported local image type: ${extension || "unknown"}`);
+    fail("UNSUPPORTED_IMAGE_TYPE", "Local Markdown image type is unsupported");
+  }
+  if (
+    !Number.isSafeInteger(stats.size) ||
+    stats.size < 0 ||
+    stats.size > MAX_LOCAL_IMAGE_BYTES
+  ) {
+    fail("RESOURCE_LIMIT_EXCEEDED", "Local Markdown image exceeds its byte limit");
   }
 
-  const bytes = readFileSync(path);
-  if (bytes.length > 10 * 1024 * 1024) {
-    throw new Error(`Local image exceeds 10 MB: ${decoded}`);
+  const projectedBytes = dataUriBytes(mime, stats.size);
+  reserveEmbeddedImage(renderBudget, resourceLimits, projectedBytes);
+  let bytes;
+  try {
+    bytes = imageIo.readFile(path);
+  } catch {
+    fail("IMAGE_READ_FAILED", "Unable to read a local Markdown image", {
+      operation: "read",
+    });
   }
-  return {
-    kind: "embedded",
-    src: `data:${mime};base64,${bytes.toString("base64")}`,
-  };
+  if (!Buffer.isBuffer(bytes)) {
+    fail("IMAGE_READ_FAILED", "Local Markdown image did not produce bytes", {
+      operation: "read",
+    });
+  }
+  if (bytes.length > MAX_LOCAL_IMAGE_BYTES) {
+    fail("RESOURCE_LIMIT_EXCEEDED", "Local Markdown image exceeds its byte limit");
+  }
+  const actualBytes = dataUriBytes(mime, bytes.length);
+  renderBudget.embeddedImageBytes -= projectedBytes;
+  reserveEmbeddedImage(renderBudget, resourceLimits, actualBytes);
+  const dataUri = `data:${mime};base64,${bytes.toString("base64")}`;
+  cache.set(path, { byteLength: actualBytes, src: dataUri });
+  return { kind: "embedded", src: dataUri };
 }
 
 function slugify(value) {

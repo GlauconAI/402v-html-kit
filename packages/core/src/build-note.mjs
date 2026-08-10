@@ -2,13 +2,12 @@ import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, statSync } from "node:fs";
 import { dirname, extname, resolve } from "node:path";
 
-import { assembleArtifactV2 } from "./document-v2.mjs";
+import { assembleArtifactV2WithVerification } from "./document-v2.mjs";
 import { ArtifactBuildError } from "./errors.mjs";
 import { parseMarkdownDocument } from "./frontmatter.mjs";
 import { atomicWriteUtf8, readUtf8File } from "./io.mjs";
 import { renderMarkdown } from "./render-markdown.mjs";
 import { renderThemeV1 } from "./theme-contract.mjs";
-import { verifyArtifactHtml } from "./verify.mjs";
 
 const BUILD_KEYS = new Set(["inputPath", "outputPath", "force", "theme"]);
 const THEME_KEYS = new Set([
@@ -227,16 +226,23 @@ export async function buildNote(options) {
   assertWritableDestination(outputPath, force);
 
   const source = readUtf8File(inputPath).content;
-  const { body, metadata } = parseMarkdownDocument(source);
+  const { body, metadata: parsedMetadata } = parseMarkdownDocument(source);
   const { articleHtml, headings } = renderMarkdown(body, {
     sourceDirectory: dirname(inputPath),
   });
+  const metadata = {
+    ...parsedMetadata,
+    title:
+      parsedMetadata.title ||
+      headings.find((heading) => heading.level === 1)?.text ||
+      "Untitled Note",
+  };
   const themeOutput = renderThemeV1(theme, {
     mode: "note",
     metadata,
     content: { articleHtml, headings },
   });
-  const html = assembleArtifactV2({
+  const { html, verification } = assembleArtifactV2WithVerification({
     mode: "note",
     metadata,
     theme: themeIdentity,
@@ -244,8 +250,6 @@ export async function buildNote(options) {
     dataBlocks: new Map(),
     consumerScripts: [],
   });
-  const verification = verifyArtifactHtml(html);
-
   prepareOutputDirectory(outputPath);
   atomicWriteUtf8(outputPath, html, { overwrite: force });
   return {

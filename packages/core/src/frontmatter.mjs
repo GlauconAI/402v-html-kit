@@ -1,8 +1,14 @@
+import { ArtifactBuildError } from "./errors.mjs";
+
 const ALLOWED_FIELDS = new Set(["title", "description", "eyebrow", "lang"]);
+
+function fail(message, details) {
+  throw new ArtifactBuildError("INVALID_MARKDOWN", message, details);
+}
 
 export function parseMarkdownDocument(source) {
   if (typeof source !== "string" || !source.trim()) {
-    throw new Error("Markdown input is empty");
+    fail("Markdown input is empty", { section: "document" });
   }
 
   const normalized = source.replace(/\r\n?/g, "\n");
@@ -12,7 +18,7 @@ export function parseMarkdownDocument(source) {
   if (normalized.startsWith("---\n")) {
     const closingIndex = normalized.indexOf("\n---\n", 4);
     if (closingIndex === -1) {
-      throw new Error("Frontmatter is missing its closing --- line");
+      fail("Markdown frontmatter is not closed", { section: "frontmatter" });
     }
 
     const frontmatter = normalized.slice(4, closingIndex);
@@ -22,7 +28,9 @@ export function parseMarkdownDocument(source) {
       if (!line.trim()) continue;
       const match = line.match(/^([a-zA-Z][a-zA-Z0-9_-]*):\s*(.*)$/);
       if (!match) {
-        throw new Error(`Invalid frontmatter line: ${line}`);
+        fail("Markdown frontmatter contains an invalid field", {
+          section: "frontmatter",
+        });
       }
 
       const [, key, rawValue] = match;
@@ -31,13 +39,10 @@ export function parseMarkdownDocument(source) {
     }
   }
 
-  const headingTitle = body.match(/^#\s+(.+)$/m)?.[1]?.trim();
-  const title = metadata.title || headingTitle || "Untitled Note";
-
   return {
     body: body.trim(),
     metadata: {
-      title,
+      title: metadata.title || "",
       description: metadata.description || "",
       eyebrow: metadata.eyebrow || "402v Knowledge",
       lang: metadata.lang || "zh-CN",

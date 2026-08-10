@@ -1,8 +1,14 @@
+import { ArtifactBuildError } from "./errors.mjs";
+
 const NODE_WIDTH = 180;
 const NODE_HEIGHT = 72;
 const COLUMN_GAP = 90;
 const ROW_GAP = 48;
 const MARGIN = 44;
+
+function fail(message, details = undefined) {
+  throw new ArtifactBuildError("INVALID_FLOW_DIAGRAM", message, details);
+}
 
 export function renderFlowDiagram(
   source,
@@ -70,20 +76,21 @@ export function renderFlowDiagram(
 
 export function parseFlowDiagram(source) {
   if (typeof source !== "string" || !source.trim()) {
-    throw new Error("Flow diagram is empty");
+    fail("Flow diagram is empty");
   }
 
   const lines = source
     .replace(/\r\n?/g, "\n")
     .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("%%"));
+    .map((line, index) => ({ line: index + 1, text: line.trim() }))
+    .filter(({ text }) => text && !text.startsWith("%%"));
   let direction = "LR";
 
-  if (/^flowchart\s+/i.test(lines[0] || "")) {
-    const match = lines.shift().match(/^flowchart\s+(LR|TD)$/i);
+  if (/^flowchart\s+/i.test(lines[0]?.text || "")) {
+    const declaration = lines.shift();
+    const match = declaration.text.match(/^flowchart\s+(LR|TD)$/i);
     if (!match) {
-      throw new Error("Flow direction must be LR or TD");
+      fail("Flow direction must be LR or TD", { line: declaration.line });
     }
     direction = match[1].toUpperCase();
   }
@@ -91,14 +98,18 @@ export function parseFlowDiagram(source) {
   const nodes = new Map();
   const edges = [];
 
-  for (const line of lines) {
-    const match = line.match(/^(.+?)\s*-->\s*(?:\|([^|]+)\|\s*)?(.+)$/);
+  for (const entry of lines) {
+    const match = entry.text.match(
+      /^(.+?)\s*-->\s*(?:\|([^|]+)\|\s*)?(.+)$/,
+    );
     if (!match) {
-      throw new Error(`Unsupported flow line: ${line}`);
+      fail("Flow diagram contains an unsupported statement", {
+        line: entry.line,
+      });
     }
 
-    const from = parseEndpoint(match[1].trim());
-    const to = parseEndpoint(match[3].trim());
+    const from = parseEndpoint(match[1].trim(), entry.line);
+    const to = parseEndpoint(match[3].trim(), entry.line);
     upsertNode(nodes, from);
     upsertNode(nodes, to);
     edges.push({
@@ -109,18 +120,18 @@ export function parseFlowDiagram(source) {
   }
 
   if (nodes.size < 2 || edges.length === 0) {
-    throw new Error("Flow diagram needs at least two nodes and one arrow");
+    fail("Flow diagram needs at least two nodes and one arrow");
   }
 
   return { direction, nodes, edges };
 }
 
-function parseEndpoint(value) {
+function parseEndpoint(value, line) {
   const match = value.match(
     /^([A-Za-z][A-Za-z0-9_-]*)(?:\[(.+)\]|\{(.+)\}|\((.+)\))?$/,
   );
   if (!match) {
-    throw new Error(`Invalid flow node: ${value}`);
+    fail("Flow diagram contains an invalid node", { line });
   }
 
   const label = match[2] || match[3] || match[4] || match[1];
