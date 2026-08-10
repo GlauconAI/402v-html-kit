@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
+  extname,
   isAbsolute,
   join,
   relative,
@@ -28,6 +29,18 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import ts from "typescript";
+
+export const publishedTextExtensions = new Set([
+  ".cjs",
+  ".cts",
+  ".js",
+  ".json",
+  ".jsx",
+  ".mjs",
+  ".mts",
+  ".ts",
+  ".tsx",
+]);
 
 const workspaceRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -262,6 +275,58 @@ function collectStaticValue(value, values) {
   else if (Array.isArray(value)) values.push(...value);
 }
 
+const browserNamedEntities = new Map([
+  ["AMP", "&"],
+  ["GT", ">"],
+  ["LT", "<"],
+  ["NewLine", "\n"],
+  ["QUOT", '"'],
+  ["Tab", "\t"],
+  ["amp", "&"],
+  ["apos", "'"],
+  ["ast", "*"],
+  ["bsol", "\\"],
+  ["colon", ":"],
+  ["comma", ","],
+  ["commat", "@"],
+  ["dollar", "$"],
+  ["equals", "="],
+  ["excl", "!"],
+  ["grave", "`"],
+  ["gt", ">"],
+  ["lpar", "("],
+  ["lcub", "{"],
+  ["lowbar", "_"],
+  ["lsqb", "["],
+  ["lt", "<"],
+  ["num", "#"],
+  ["percnt", "%"],
+  ["period", "."],
+  ["plus", "+"],
+  ["quest", "?"],
+  ["quot", '"'],
+  ["rpar", ")"],
+  ["rcub", "}"],
+  ["rsqb", "]"],
+  ["semi", ";"],
+  ["sol", "/"],
+  ["verbar", "|"],
+]);
+
+function decodeBrowserHtmlEntities(value) {
+  return value.replace(
+    /&#(?:x([0-9A-Fa-f]{1,8})|([0-9]{1,10}));?|&([A-Za-z][A-Za-z0-9]+);/gu,
+    (entity, hexadecimal, decimal, named) => {
+      if (named !== undefined) return browserNamedEntities.get(named) ?? entity;
+      const codePoint = Number.parseInt(hexadecimal ?? decimal, hexadecimal === undefined ? 10 : 16);
+      if (codePoint === 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+        return "�";
+      }
+      return String.fromCodePoint(codePoint);
+    },
+  );
+}
+
 function decodedTypeScriptValues(source, path) {
   const values = [];
   const credentials = [];
@@ -313,7 +378,7 @@ function decodedTypeScriptValues(source, path) {
     }
   };
   const visit = (node, scope) => {
-    if (ts.isSourceFile(node) || ts.isBlock(node)) {
+    if (ts.isSourceFile(node) || ts.isBlock(node) || ts.isModuleBlock(node)) {
       const childScope = new Map(scope);
       populateLexicalBindings(node.statements, childScope);
       for (const statement of node.statements) {
@@ -347,6 +412,7 @@ function decodedTypeScriptValues(source, path) {
     }
     const value = staticValue(node, scope);
     collectStaticValue(value, values);
+    if (ts.isJsxText(node)) values.push(node.text);
     if (ts.isPropertyAssignment(node)) {
       inspectCredential(typescriptPropertyName(node.name), staticValue(node.initializer, scope));
     }
@@ -383,7 +449,7 @@ function decodedDocumentValues(source, path) {
     visit(document, undefined);
     return { credentials, values };
   }
-  if (!/\.(?:cjs|d\.mts|js|jsx|mjs|mts|ts|tsx)$/iu.test(path)) {
+  if (!publishedTextExtensions.has(extname(path))) {
     return { credentials, values };
   }
   return decodedTypeScriptValues(source, path);
@@ -429,7 +495,9 @@ export function inspectPublishedText({
   }
   const decoded = decodedDocumentValues(source, path);
   scanForbiddenValue(packageName, path, source);
-  for (const value of decoded.values) scanForbiddenValue(packageName, path, value, true);
+  for (const value of decoded.values) {
+    scanForbiddenValue(packageName, path, decodeBrowserHtmlEntities(value), true);
+  }
   for (const credential of decoded.credentials) {
     if (credential.length >= 8 && !safeInterpolation(credential)) {
       fail(`literal credential found in ${packageName}/${path}`);
@@ -571,11 +639,15 @@ export function hashArchive(archive, algorithm) {
 }
 
 export function verifyArchiveIntegrity(archive, integrity) {
-  const match = integrity?.match(/^([a-z0-9]+)-(.+)$/iu);
-  if (match === null || match === undefined) fail("Invalid archive integrity");
-  if (match[1] !== "sha512") fail("Archive integrity algorithm must be sha512");
-  const expected = Buffer.from(match[2], "base64");
-  const actual = hashArchive(archive, match[1]);
+  const match = integrity?.match(/^sha512-([A-Za-z0-9+/]{86}==)$/u);
+  if (match === null || match === undefined) {
+    fail("Archive integrity must be a canonical sha512 SRI digest");
+  }
+  const expected = Buffer.from(match[1], "base64");
+  if (expected.length !== 64 || expected.toString("base64") !== match[1]) {
+    fail("Archive integrity must be a canonical sha512 SRI digest");
+  }
+  const actual = hashArchive(archive, "sha512");
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     fail("Archive integrity does not match packed bytes");
   }
@@ -613,6 +685,59 @@ function contained(root, candidate) {
   );
 }
 
+const persistentSupervisorSource = `const { spawn } = require("node:child_process");
+const executable = process.argv[1];
+const args = process.argv.slice(2);
+let reported = false;
+const report = (message) => {
+  if (reported) return;
+  reported = true;
+  if (process.send) process.send(message);
+};
+const command = spawn(executable, args, {
+  cwd: process.cwd(),
+  env: process.env,
+  shell: false,
+  stdio: ["ignore", "pipe", "pipe"],
+  windowsHide: true,
+});
+command.stdout.pipe(process.stdout, { end: false });
+command.stderr.pipe(process.stderr, { end: false });
+command.once("error", (error) => report({
+  message: String(error.message).slice(0, 1024),
+  type: "spawn-error",
+}));
+command.once("close", (status, signal) => {
+  const pending = [];
+  if (process.stdout.writableNeedDrain) pending.push(new Promise((resolve) => process.stdout.once("drain", resolve)));
+  if (process.stderr.writableNeedDrain) pending.push(new Promise((resolve) => process.stderr.once("drain", resolve)));
+  Promise.all(pending).then(() => report({ status, signal, type: "result" }));
+});
+setInterval(() => {}, 1000);`;
+
+export function supervisedCommandPlan({
+  args,
+  executable,
+  nodeExecutable = process.execPath,
+  platform = process.platform,
+}) {
+  if (
+    typeof executable !== "string" ||
+    executable === "" ||
+    executable.includes("\0") ||
+    !Array.isArray(args) ||
+    args.some((argument) => typeof argument !== "string" || argument.includes("\0"))
+  ) {
+    fail("Invalid supervised command executable or arguments");
+  }
+  if (platform !== "win32") return { args: [...args], executable, supervised: false };
+  return {
+    args: ["-e", persistentSupervisorSource, "--", executable, ...args],
+    executable: nodeExecutable,
+    supervised: true,
+  };
+}
+
 const activeProcessTrees = new Set();
 let runDeadline = Number.POSITIVE_INFINITY;
 let shutdownError;
@@ -632,17 +757,6 @@ function assertRunActive() {
 }
 
 async function signalProcessTree(snapshot, signal) {
-  if (process.platform === "win32") {
-    await new Promise((resolvePromise) => {
-      const killer = spawn("taskkill", ["/pid", String(snapshot.rootPid), "/t", "/f"], {
-        env: sanitizedEnvironment(),
-        stdio: "ignore",
-      });
-      killer.once("error", resolvePromise);
-      killer.once("close", resolvePromise);
-    });
-    return;
-  }
   try {
     process.kill(-snapshot.groupId, signal);
   } catch {
@@ -650,9 +764,37 @@ async function signalProcessTree(snapshot, signal) {
   }
 }
 
+export function terminateWindowsSupervisor(record, { spawnProcess = spawn } = {}) {
+  record.terminating = true;
+  record.terminationPromise ??= new Promise((resolvePromise) => {
+    const killer = spawnProcess(
+      "taskkill",
+      ["/pid", String(record.rootPid), "/t", "/f"],
+      {
+        env: sanitizedEnvironment(),
+        stdio: "ignore",
+      },
+    );
+    killer.once("error", resolvePromise);
+    killer.once("close", resolvePromise);
+  });
+  return record.terminationPromise;
+}
+
 async function terminateProcessTrees(records) {
   const uniqueRecords = [...new Set(records)];
   if (uniqueRecords.length === 0) return;
+  if (process.platform === "win32") {
+    for (const record of uniqueRecords) {
+      const termination = terminateWindowsSupervisor(record);
+      if (record.terminationCleanupAttached !== true) {
+        record.terminationCleanupAttached = true;
+        record.terminationPromise = termination.finally(() => activeProcessTrees.delete(record));
+      }
+    }
+    await Promise.all(uniqueRecords.map((record) => record.terminationPromise));
+    return;
+  }
   const snapshots = uniqueRecords.map((record) => ({
     groupId: record.groupId,
     rootPid: record.rootPid,
@@ -675,20 +817,25 @@ async function command(executable, args, options = {}) {
   if (remaining <= 0) throw new SmokeExitError("Package smoke global deadline exceeded", 124);
   const timeout = Math.max(1, Math.min(options.timeout ?? 120_000, remaining));
   return await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, args, {
+    const execution = supervisedCommandPlan({ args, executable });
+    const child = spawn(execution.executable, execution.args, {
       cwd: options.cwd ?? workspaceRoot,
       detached: process.platform !== "win32",
       env: sanitizedEnvironment(process.env, {
         NO_COLOR: "1",
         ...options.env,
       }),
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: execution.supervised
+        ? ["ignore", "pipe", "pipe", "ipc"]
+        : ["ignore", "pipe", "pipe"],
     });
     const record = {
       child,
       groupId: child.pid,
       rootPid: child.pid,
+      supervised: execution.supervised,
       terminating: false,
+      terminationCleanupAttached: false,
       terminationPromise: undefined,
     };
     activeProcessTrees.add(record);
@@ -698,6 +845,8 @@ async function command(executable, args, options = {}) {
     let outputBytes = 0;
     let timedOut = false;
     let outputLimited = false;
+    let supervisedResult;
+    let supervisorError;
     const terminateRecord = () => {
       record.terminationPromise ??= terminateProcessTrees([record]);
       return record.terminationPromise;
@@ -714,6 +863,36 @@ async function command(executable, args, options = {}) {
     };
     child.stdout.on("data", capture(stdout));
     child.stderr.on("data", capture(stderr));
+    if (execution.supervised) {
+      child.on("message", (message) => {
+        if (supervisedResult !== undefined || supervisorError !== undefined) return;
+        let messageSize = Number.POSITIVE_INFINITY;
+        try {
+          const serialized = JSON.stringify(message);
+          if (serialized !== undefined) messageSize = Buffer.byteLength(serialized);
+        } catch {
+          // Invalid or cyclic IPC is rejected below.
+        }
+        if (messageSize > 4096 || message === null || typeof message !== "object") {
+          supervisorError = new Error("Windows command supervisor emitted invalid IPC");
+        } else if (message.type === "result") {
+          if (
+            !(message.status === null || Number.isInteger(message.status)) ||
+            !(message.signal === null || typeof message.signal === "string")
+          ) {
+            supervisorError = new Error("Windows command supervisor emitted invalid result IPC");
+          } else {
+            supervisedResult = { signal: message.signal, status: message.status };
+          }
+        } else if (message.type === "spawn-error" && typeof message.message === "string") {
+          supervisorError = new Error(`${executable} could not run: ${message.message}`);
+        } else {
+          supervisorError = new Error("Windows command supervisor emitted unknown IPC");
+        }
+        clearTimeout(timer);
+        void terminateRecord();
+      });
+    }
     const timer = setTimeout(() => {
       timedOut = true;
       void terminateRecord();
@@ -728,7 +907,7 @@ async function command(executable, args, options = {}) {
       clearTimeout(timer);
       if (!record.terminating) {
         let processTreeSurvives = false;
-        if (process.platform !== "win32") {
+        if (!execution.supervised) {
           try {
             process.kill(-record.groupId, 0);
             processTreeSurvives = true;
@@ -740,8 +919,8 @@ async function command(executable, args, options = {}) {
       }
       if (record.terminationPromise !== undefined) await record.terminationPromise;
       const result = {
-        status,
-        signal,
+        status: supervisedResult?.status ?? status,
+        signal: supervisedResult?.signal ?? signal,
         stderr: Buffer.concat(stderr).toString("utf8"),
         stdout: Buffer.concat(stdout).toString("utf8"),
       };
@@ -752,9 +931,13 @@ async function command(executable, args, options = {}) {
           `${executable} exceeded its ${outputLimited ? "output limit" : "timeout"}`,
           124,
         ));
-      } else if (status !== 0) {
+      } else if (supervisorError !== undefined) {
+        rejectPromise(supervisorError);
+      } else if (execution.supervised && supervisedResult === undefined) {
+        rejectPromise(new Error("Windows command supervisor exited before reporting a result"));
+      } else if (result.status !== 0) {
         rejectPromise(new Error(
-          `${executable} ${args.join(" ")} exited ${status ?? signal}\n` +
+          `${executable} ${args.join(" ")} exited ${result.status ?? result.signal}\n` +
           `${result.stdout}${result.stderr}`,
         ));
       } else {
@@ -850,6 +1033,9 @@ function assertSafeArchivePath(path) {
 }
 
 function scanPackedText(packageName, path, content, reviewedBrandFiles) {
+  if (!publishedTextExtensions.has(extname(path))) {
+    fail(`Unreviewed published text extension: ${path}`);
+  }
   inspectPublishedText({ packageName, path, content, reviewedBrandFiles });
 }
 

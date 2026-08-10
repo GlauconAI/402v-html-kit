@@ -4,20 +4,10 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { inspectPublishedText } from "./pack-smoke.mjs";
+import { inspectPublishedText, publishedTextExtensions } from "./pack-smoke.mjs";
 
 const workspaceRoot = fileURLToPath(new URL("../../", import.meta.url));
 const packageRoot = join(workspaceRoot, "packages");
-const publicFileExtensions = new Set([
-  ".cjs",
-  ".js",
-  ".json",
-  ".jsx",
-  ".mjs",
-  ".mts",
-  ".ts",
-  ".tsx",
-]);
 const reviewedThemeBrandFiles = new Set([
   "packages/theme-402v/src/interactive-shell.mjs",
   "packages/theme-402v/src/note-shell.mjs",
@@ -41,7 +31,7 @@ async function publicProductionFiles() {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
         const path = join(directory, entry.name);
         if (entry.isDirectory()) pending.push(path);
-        else if (entry.isFile() && publicFileExtensions.has(extname(entry.name))) {
+        else if (entry.isFile() && publishedTextExtensions.has(extname(entry.name))) {
           files.push(path);
         }
       }

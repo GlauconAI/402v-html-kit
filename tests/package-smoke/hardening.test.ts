@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -128,6 +129,8 @@ describe("package boundary hardening", () => {
       "probeWindowsInstalledShim",
       "sanitizedEnvironment",
       "assertPackedManifestMatches",
+      "supervisedCommandPlan",
+      "terminateWindowsSupervisor",
       "validatePackFilename",
       "verifyArchiveIntegrity",
       "verifyWindowsCmdShim",
@@ -219,6 +222,50 @@ describe("package boundary hardening", () => {
     ["TSX", "src/probe.tsx", 'export const view: JSX.Element = <div data-label="safe">safe</div>;'],
   ])("parses valid %s using its matching script kind", (_label, path, source) => {
     expect(() => inspect(source, { path })).not.toThrow();
+  });
+
+  it("pre-collects immutable bindings inside TypeScript namespace module blocks", () => {
+    expect(() => inspect(
+      'namespace Review { function probe() { const endpoint = prefix + "v.com"; } const prefix = "402"; }',
+      { path: "src/probe.ts" },
+    )).toThrow();
+    expect(() => inspect(
+      'const prefix = "402"; namespace Review { function probe() { const endpoint = prefix + "v.com"; } const prefix = "safe"; }',
+      { path: "src/probe.ts" },
+    )).not.toThrow();
+    expect(() => inspect(
+      'const prefix = "safe"; namespace Review { function probe() { const endpoint = prefix + "v.com"; } const prefix = "402"; }',
+      { path: "src/probe.ts" },
+    )).toThrow();
+  });
+
+  it.each([
+    ["CTS", "src/probe.cts", 'const endpoint = ["Ver", "cel"].join("");'],
+    ["declaration CTS", "src/probe.d.cts", 'export declare const endpoint: "402v\\u002ecom";'],
+  ])("scans %s published text", (_label, path, source) => {
+    expect(() => inspect(source, { path })).toThrow();
+  });
+
+  it("uses one published text extension allowlist for source and tar scanning", () => {
+    expect([...smoke.publishedTextExtensions].sort()).toEqual([
+      ".cjs",
+      ".cts",
+      ".js",
+      ".json",
+      ".jsx",
+      ".mjs",
+      ".mts",
+      ".ts",
+      ".tsx",
+    ]);
+  });
+
+  it.each([
+    ["named entity in a string", "src/probe.mjs", 'const endpoint = "402v&period;com";'],
+    ["decimal entity in a JSX attribute", "src/probe.jsx", '<div data-endpoint="Sup&#97;base" />;'],
+    ["hex entity in JSX text", "src/probe.tsx", '<div>Ver&#x63;el</div>;'],
+  ])("decodes %s before forbidden-content checks", (_label, path, source) => {
+    expect(() => inspect(source, { path })).toThrow();
   });
 
   it("parses package JavaScript without evaluating it", () => {
@@ -406,7 +453,112 @@ describe("package boundary hardening", () => {
     expect(() => smoke.verifyArchiveIntegrity(Buffer.from("altered"), integrity)).toThrow();
     const sha256 = `sha256-${smoke.hashArchive(archive, "sha256").toString("base64")}`;
     expect(() => smoke.verifyArchiveIntegrity(archive, sha256)).toThrow(/sha512/);
+    expect(() => smoke.verifyArchiveIntegrity(archive, `${integrity}junk`)).toThrow();
+    expect(() => smoke.verifyArchiveIntegrity(archive, integrity.slice(0, -1))).toThrow();
+    expect(() => smoke.verifyArchiveIntegrity(
+      archive,
+      integrity.replace("sha512-", "SHA512-"),
+    )).toThrow();
   });
+
+  it("builds an injection-free persistent supervisor invocation", () => {
+    const plan = smoke.supervisedCommandPlan({
+      args: ["/d", "/s", "/c", '"C:\\Review User\\tool.cmd" "a & b"'],
+      executable: "C:\\Windows\\System32\\cmd.exe",
+      nodeExecutable: "C:\\Program Files\\nodejs\\node.exe",
+      platform: "win32",
+    });
+    expect(plan).toEqual(expect.objectContaining({
+      executable: "C:\\Program Files\\nodejs\\node.exe",
+      supervised: true,
+    }));
+    expect(plan.args.slice(-5)).toEqual([
+      "C:\\Windows\\System32\\cmd.exe",
+      "/d",
+      "/s",
+      "/c",
+      '"C:\\Review User\\tool.cmd" "a & b"',
+    ]);
+  });
+
+  it("taskkills an owned Windows supervisor PID exactly once", async () => {
+    const calls: Array<{ executable: string; args: string[] }> = [];
+    const spawnProcess = (executable: string, args: string[]) => {
+      calls.push({ executable, args });
+      const killer = new EventEmitter();
+      queueMicrotask(() => killer.emit("close", 0));
+      return killer;
+    };
+    const record = { rootPid: 4242, terminating: false, terminationPromise: undefined };
+    await Promise.all([
+      smoke.terminateWindowsSupervisor(record, { spawnProcess }),
+      smoke.terminateWindowsSupervisor(record, { spawnProcess }),
+    ]);
+    expect(calls).toEqual([{
+      executable: "taskkill",
+      args: ["/pid", "4242", "/t", "/f"],
+    }]);
+    expect(record.terminating).toBe(true);
+  });
+
+  it("keeps a persistent supervisor PID owned after its command leader exits", async () => {
+    const actualSource = `const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+child.unref();
+process.stdout.write(JSON.stringify({ grandchildPid: child.pid }) + "\\n");`;
+    const plan = smoke.supervisedCommandPlan({
+      args: ["-e", actualSource],
+      executable: process.execPath,
+      nodeExecutable: process.execPath,
+      platform: "win32",
+    });
+    const supervisor = spawn(plan.executable, plan.args, {
+      detached: process.platform !== "win32",
+      env: smoke.sanitizedEnvironment(),
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    const resultMessage = new Promise<Record<string, unknown>>((resolve, reject) => {
+      supervisor.once("error", reject);
+      supervisor.once("message", (message) => resolve(message as Record<string, unknown>));
+    });
+    const supervisorExit = new Promise<void>((resolve) => {
+      supervisor.once("exit", () => resolve());
+    });
+    let stdout = "";
+    supervisor.stdout!.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    try {
+      await expect(resultMessage).resolves.toEqual(expect.objectContaining({
+        status: 0,
+        type: "result",
+      }));
+      await waitUntil(() => stdout.endsWith("\n"));
+      const { grandchildPid } = JSON.parse(stdout) as { grandchildPid: number };
+      expect(processExists(supervisor.pid!)).toBe(true);
+      expect(processExists(grandchildPid)).toBe(true);
+      if (process.platform === "win32") {
+        await new Promise<void>((resolve) => {
+          spawn("taskkill", ["/pid", String(supervisor.pid), "/t", "/f"], {
+            stdio: "ignore",
+          }).once("close", () => resolve());
+        });
+      } else {
+        process.kill(-supervisor.pid!, "SIGKILL");
+      }
+      await supervisorExit;
+      await waitUntil(() => !processExists(grandchildPid));
+    } finally {
+      if (supervisor.exitCode === null && supervisor.signalCode === null) {
+        try {
+          if (process.platform === "win32") supervisor.kill("SIGKILL");
+          else process.kill(-supervisor.pid!, "SIGKILL");
+        } catch {
+          // The owned supervisor group has already exited.
+        }
+      }
+    }
+  }, 20_000);
 
   it("compares all packed manifest publication fields to source", () => {
     const source = {
