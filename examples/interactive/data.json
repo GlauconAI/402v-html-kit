@@ -1,0 +1,8 @@
+{
+  "items": [
+    { "label": "Build", "value": 3 },
+    { "label": "Verify", "value": 5 },
+    { "label": "Share", "value": 2 }
+  ],
+  "status": "ready"
+}
