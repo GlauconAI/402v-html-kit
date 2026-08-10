@@ -185,14 +185,16 @@ export function validateVerifiedAttestation({ artifact, audit, source }) {
   }
   invariant(Array.isArray(audit?.verified), "npm did not return verified attestations");
   const verified = audit.verified.filter((entry) => entry.name === artifact.name && entry.version === artifact.version);
-  if (verified.length !== 1) {
+  if (verified.length === 0) {
     throw attestationUnavailable(`npm did not return exactly one verified entry for ${artifact.name}@${artifact.version}`);
   }
+  invariant(verified.length === 1, `npm returned more than one verified entry for ${artifact.name}@${artifact.version}`);
   const provenances = (verified[0].attestationBundles ?? [])
     .filter((entry) => entry.predicateType === PROVENANCE_PREDICATE);
-  if (provenances.length !== 1) {
+  if (provenances.length === 0) {
     throw attestationUnavailable(`${artifact.name}@${artifact.version} must have exactly one npm-verified SLSA v1 provenance bundle`);
   }
+  invariant(provenances.length === 1, `${artifact.name}@${artifact.version} has more than one npm-verified SLSA v1 provenance bundle`);
 
   const payload = provenances[0].bundle?.dsseEnvelope?.payload;
   invariant(typeof payload === "string" && payload !== "", "Verified provenance bundle has no DSSE payload");

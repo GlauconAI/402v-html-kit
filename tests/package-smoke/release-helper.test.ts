@@ -135,6 +135,14 @@ const publicCertificateSource = {
   ref: "refs/heads/main",
 };
 const githubOidcIssuer = "https://token.actions.githubusercontent.com";
+const offlineTufFixtureTime = new Date("2026-08-10T00:00:00Z");
+
+function offlineTufMetadata(): any {
+  return JSON.parse(readFileSync(
+    new URL("./fixtures/sigstore-tuf-metadata.json", import.meta.url),
+    "utf8",
+  ));
+}
 
 function realProvenanceBundle(): Record<string, unknown> {
   return JSON.parse(readFileSync(
@@ -147,10 +155,7 @@ function createOfflineTufCache(): string {
   const root = mkdtempSync(join(tmpdir(), "402v-sigstore-tuf-test-"));
   const repository = join(root, "tuf-repo-cdn.sigstore.dev");
   mkdirSync(join(repository, "targets"), { recursive: true });
-  const metadata = JSON.parse(readFileSync(
-    new URL("./fixtures/sigstore-tuf-metadata.json", import.meta.url),
-    "utf8",
-  ));
+  const metadata = offlineTufMetadata();
   for (const name of ["root", "timestamp", "snapshot", "targets"]) {
     writeFileSync(join(repository, `${name}.json`), JSON.stringify(metadata[name]), "utf8");
   }
@@ -183,6 +188,13 @@ describe("trusted release helper", () => {
     expect(policy.issuer).toBe(githubOidcIssuer);
   });
 
+  it("pins real offline Sigstore verification inside every TUF metadata validity window", () => {
+    const metadata = offlineTufMetadata();
+    for (const name of ["root", "timestamp", "snapshot", "targets"]) {
+      expect(offlineTufFixtureTime.getTime()).toBeLessThan(Date.parse(metadata[name].signed.expires));
+    }
+  });
+
   it.each([
     ["expected SAN and issuer", publicCertificateSource, githubOidcIssuer, false],
     ["wrong workflow SAN", { ...publicCertificateSource, workflow: ".github/workflows/other.yml" }, githubOidcIssuer, true],
@@ -191,7 +203,9 @@ describe("trusted release helper", () => {
   ])("uses real sigstore verification for %s", async (_label, source, issuer, rejects) => {
     const { verifyBundleCertificate } = await helper();
     const tufCachePath = createOfflineTufCache();
+    vi.useFakeTimers();
     try {
+      vi.setSystemTime(offlineTufFixtureTime);
       const verification = verifyBundleCertificate({
         bundle: realProvenanceBundle(),
         source,
@@ -202,6 +216,7 @@ describe("trusted release helper", () => {
       else await expect(verification).resolves.toBeUndefined();
     } finally {
       rmSync(tufCachePath, { recursive: true, force: true });
+      vi.useRealTimers();
     }
   });
 
@@ -210,7 +225,9 @@ describe("trusted release helper", () => {
     const bundle: any = structuredClone(realProvenanceBundle());
     delete bundle.verificationMaterial.certificate;
     const tufCachePath = createOfflineTufCache();
+    vi.useFakeTimers();
     try {
+      vi.setSystemTime(offlineTufFixtureTime);
       await expect(verifyBundleCertificate({
         bundle,
         source: publicCertificateSource,
@@ -218,6 +235,7 @@ describe("trusted release helper", () => {
       })).rejects.toThrow();
     } finally {
       rmSync(tufCachePath, { recursive: true, force: true });
+      vi.useRealTimers();
     }
   });
 
@@ -491,6 +509,35 @@ describe("trusted release helper", () => {
       sleep,
       maxPolls: 3,
     })).rejects.toThrow(/wrong signer/u);
+    expect(verifyAttestation).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["duplicate verified entries", (audit: any) => {
+      audit.verified.push(structuredClone(audit.verified[0]));
+    }],
+    ["duplicate provenance bundles", (audit: any) => {
+      audit.verified[0].attestationBundles.push(structuredClone(audit.verified[0].attestationBundles[0]));
+    }],
+  ])("does not retry permanent %s", async (_label, mutateAudit) => {
+    const { publishResumably, validateVerifiedAttestation } = await helper();
+    const artifact = artifactFixture()[0];
+    const audit = npmAuditResult(artifact);
+    mutateAudit(audit);
+    const verifyAttestation = vi.fn(async (item, source) => {
+      validateVerifiedAttestation({ artifact: item, audit, source });
+    });
+    const sleep = vi.fn();
+    await expect(publishResumably({
+      artifacts: [artifact],
+      source: sourceIdentity(),
+      lookup: vi.fn().mockResolvedValueOnce(null).mockResolvedValue(registryDist(artifact)),
+      publish: vi.fn().mockResolvedValue(undefined),
+      verifyAttestation,
+      sleep,
+      maxPolls: 3,
+    })).rejects.toThrow(/more than one/u);
     expect(verifyAttestation).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
   });
