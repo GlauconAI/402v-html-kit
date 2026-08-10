@@ -7,11 +7,12 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -26,22 +27,31 @@ const workspaceRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
+const sourceExamplesRoot = join(workspaceRoot, "examples");
+const exampleSourceFiles = Object.freeze([
+  ["note", "input.md"],
+  ["interactive", "artifact.mjs"],
+  ["interactive", "data.json"],
+  ["interactive", "renderer.mjs"],
+  ["custom-theme", "artifact-theme.mjs"],
+  ["custom-theme", "input.md"],
+] as const);
 const exampleCases = Object.freeze([
   {
     name: "note",
-    directory: join(workspaceRoot, "examples", "note"),
+    relativeDirectory: "note",
     buildArgs: ["build", "input.md", "--output", "output.html"],
     verifyArgs: ["verify", "output.html"],
   },
   {
     name: "interactive",
-    directory: join(workspaceRoot, "examples", "interactive"),
+    relativeDirectory: "interactive",
     buildArgs: ["build-artifact", "artifact.mjs", "--output", "output.html"],
     verifyArgs: ["verify", "output.html", "--required-block", "dashboard"],
   },
   {
     name: "custom-theme",
-    directory: join(workspaceRoot, "examples", "custom-theme"),
+    relativeDirectory: "custom-theme",
     buildArgs: [
       "build",
       "input.md",
@@ -79,6 +89,9 @@ const temporaryRoots: string[] = [];
 const builtExamples: ExampleResult[] = [];
 let binary = "";
 let browser: Awaited<ReturnType<typeof launchChrome>> | undefined;
+let cleanConsumerRoot = "";
+let cleanThemeDirectory = "";
+let cleanExamplesRoot = "";
 
 function temporaryRoot(label: string) {
   const root = mkdtempSync(join(tmpdir(), label));
@@ -138,9 +151,19 @@ function digest(path: string) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+function contained(root: string, candidate: string) {
+  const difference = relative(root, candidate);
+  return difference === "" || (
+    !isAbsolute(difference) &&
+    difference !== ".." &&
+    !difference.startsWith(`..${sep}`)
+  );
+}
+
 function preparePackedCli() {
   const packRoot = temporaryRoot("402v-examples-pack-");
   const consumerRoot = temporaryRoot("402v-examples-consumer-");
+  cleanConsumerRoot = consumerRoot;
   const npmCache = join(packRoot, "npm-cache");
   const dependencies: Record<string, string> = {};
   const packedDetails = new Map<string, Record<string, string>>();
@@ -252,27 +275,50 @@ function preparePackedCli() {
   expect(installed.stderr).toBe("");
   expect(existsSync(join(consumerRoot, "node_modules"))).toBe(true);
   for (const name of ["html-kit-core", "html-kit-cli", "theme-402v"]) {
+    const packageDirectory = realpathSync(
+      join(consumerRoot, "node_modules", "@402v", name),
+    );
     expect(
-      realpathSync(join(consumerRoot, "node_modules", "@402v", name)).startsWith(
-        `${consumerRoot}/`,
-      ),
+      contained(consumerRoot, packageDirectory),
     ).toBe(true);
   }
-  return join(consumerRoot, "node_modules", ".bin", "402v-html-kit");
+  cleanThemeDirectory = join(
+    consumerRoot,
+    "node_modules",
+    "@402v",
+    "theme-402v",
+  );
+  cleanExamplesRoot = join(consumerRoot, "examples");
+  for (const [directory, name] of exampleSourceFiles) {
+    const destinationDirectory = join(cleanExamplesRoot, directory);
+    mkdirSync(destinationDirectory, { recursive: true });
+    copyFileSync(
+      join(sourceExamplesRoot, directory, name),
+      join(destinationDirectory, name),
+    );
+  }
+  const consumerBinary = join(
+    consumerRoot,
+    "node_modules",
+    ".bin",
+    "402v-html-kit",
+  );
+  expect(contained(consumerRoot, realpathSync(consumerBinary))).toBe(true);
+  return consumerBinary;
 }
 
 function buildExamples() {
   for (const example of exampleCases) {
-    const outputPath = join(example.directory, "output.html");
-    rmSync(outputPath, { force: true });
+    const directory = join(cleanExamplesRoot, example.relativeDirectory);
+    const outputPath = join(directory, "output.html");
     expect(existsSync(outputPath)).toBe(false);
 
-    successfulJson(run(binary, example.buildArgs, example.directory));
+    successfulJson(run(binary, example.buildArgs, directory));
     const firstHash = digest(outputPath);
-    successfulJson(run(binary, [...example.buildArgs, "--force"], example.directory));
+    successfulJson(run(binary, [...example.buildArgs, "--force"], directory));
     const secondHash = digest(outputPath);
     const verification = successfulJson(
-      run(binary, example.verifyArgs, example.directory),
+      run(binary, example.verifyArgs, directory),
     );
     builtExamples.push({
       name: example.name,
@@ -399,9 +445,6 @@ describe.sequential("packed offline examples", () => {
   }, 180_000);
 
   afterAll(async () => {
-    for (const example of exampleCases) {
-      rmSync(join(example.directory, "output.html"), { force: true });
-    }
     for (const root of temporaryRoots.splice(0)) {
       rmSync(root, { recursive: true, force: true });
     }
@@ -422,16 +465,66 @@ describe.sequential("packed offline examples", () => {
         issues: [],
       });
     }
+    for (const name of ["note", "interactive"]) {
+      const example = builtExamples.find((candidate) => candidate.name === name)!;
+      expect(readFileSync(example.outputPath, "utf8")).toContain(
+        '<meta name="html-kit-theme-id" content="402v">',
+      );
+    }
+  });
+
+  it("builds only from a copied example tree inside the clean consumer", () => {
+    expect(
+      builtExamples.every((example) => contained(cleanConsumerRoot, example.outputPath)),
+    ).toBe(true);
+    expect(contained(cleanConsumerRoot, realpathSync(cleanThemeDirectory))).toBe(true);
+    for (const example of exampleSourceFiles) {
+      expect(existsSync(join(cleanExamplesRoot, ...example))).toBe(true);
+    }
   });
 
   it("keeps the custom theme independent from 402v presentation identifiers", () => {
     const html = readFileSync(
-      new URL("../../examples/custom-theme/output.html", import.meta.url),
+      join(cleanExamplesRoot, "custom-theme", "output.html"),
       "utf8",
     );
     expect(html).not.toMatch(/402v\.com|__402vArtifact|data-402v-|--accent/);
     expect(html).toContain("__htmlKitArtifact");
     expect(html).toContain('content="paper"');
+  });
+
+  it("cannot resolve the official theme from the host workspace", () => {
+    const unavailable = `${cleanThemeDirectory}.unavailable`;
+    renameSync(cleanThemeDirectory, unavailable);
+    try {
+      const probes = [
+        {
+          args: [
+            "build",
+            "input.md",
+            "--output",
+            join(cleanConsumerRoot, "host-fallback-note.html"),
+          ],
+          directory: join(cleanExamplesRoot, "note"),
+        },
+        {
+          args: [
+            "build-artifact",
+            "artifact.mjs",
+            "--output",
+            join(cleanConsumerRoot, "host-fallback-interactive.html"),
+          ],
+          directory: join(cleanExamplesRoot, "interactive"),
+        },
+      ];
+      for (const probe of probes) {
+        const result = run(binary, probe.args, probe.directory);
+        expect(result.status).not.toBe(0);
+        expect(result.stdout).toContain("THEME_RESOLUTION_FAILED");
+      }
+    } finally {
+      renameSync(unavailable, cleanThemeDirectory);
+    }
   });
 
   describe("real Chrome file acceptance", () => {
@@ -445,16 +538,16 @@ describe.sequential("packed offline examples", () => {
 
     it.each(
       exampleCases.flatMap((example) => [
-        [example.name, example.directory, 1280, 900] as const,
-        [example.name, example.directory, 390, 844] as const,
+        [example.name, example.relativeDirectory, 1280, 900] as const,
+        [example.name, example.relativeDirectory, 390, 844] as const,
       ]),
     )(
       "opens %s via file:// at %sx%s without external requests, errors, or overflow",
-      async (_name, directory, width, height) => {
+      async (_name, relativeDirectory, width, height) => {
         if (browser === undefined) throw new Error("Chrome did not start");
         const inspected = await inspectFile(
           browser.connection,
-          join(directory, "output.html"),
+          join(cleanExamplesRoot, relativeDirectory, "output.html"),
           { width, height },
         );
         expect(inspected.metrics.contract).toBe("2");
