@@ -389,10 +389,13 @@ describe("workspace CLI process contract", () => {
     )).toMatchObject({ command: "verify", mode: "interactive", issues: [] });
   }, 20_000);
 
-  it("keeps preserve unavailable and gives v1 update priority without imports", () => {
+  it("keeps preserve unavailable and gates corrupt v1 before imports or input", () => {
     const root = temporaryRoot();
     const manifest = writeInteractive(root);
-    copyFileSync(v1Interactive, join(root, "artifact.html"));
+    const fixture = readFileSync(v1Interactive, "utf8");
+    const corrupted = fixture.replace('"name": "Agent Atlas"', '"name": "Agent AtlaX"');
+    expect(corrupted).not.toBe(fixture);
+    writeFileSync(join(root, "artifact.html"), corrupted);
     const before = readFileSync(join(root, "artifact.html"));
     const marker = join(root, "manifest-imported");
     writeFileSync(

@@ -244,7 +244,6 @@ export async function updateArtifactData(options) {
   const sourceIdentity = fileIdentity(sourcePath, "artifactPath");
   const source = readUtf8File(sourcePath);
   const contract = detectArtifactContract(source.content);
-  const sourceVerification = verifyArtifactHtml(source.content);
 
   if (contract.version === 1 && inspected.upgradeContract !== 2) {
     fail(
@@ -254,6 +253,7 @@ export async function updateArtifactData(options) {
     );
   }
 
+  const sourceVerification = verifyArtifactHtml(source.content);
   if (contract.mode !== "interactive" || sourceVerification.mode !== "interactive") {
     fail("INVALID_ARTIFACT_MODE", "Only interactive artifacts support data updates");
   }
