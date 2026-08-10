@@ -20,7 +20,7 @@ const IMAGE_MIME_TYPES = new Map([
 export function renderMarkdown(body, { sourceDirectory }) {
   const headings = extractHeadings(body);
   const headingIds = [...headings];
-  const allocateId = createIdAllocator(headings.map((heading) => heading.id));
+  const allocateId = createIdAllocator(discoverRenderedHeadingIds(body, headings));
   let flowIndex = 0;
   const components = {
     h1: headingComponent("h1", headingIds),
@@ -110,6 +110,26 @@ export function renderMarkdown(body, { sourceDirectory }) {
   return { articleHtml, headings };
 }
 
+function discoverRenderedHeadingIds(body, headings) {
+  const renderedIds = [];
+  const headingIds = [...headings];
+  const recordId = (id) => renderedIds.push(id);
+  const components = {
+    h1: headingComponent("h1", headingIds, recordId),
+    h2: headingComponent("h2", headingIds, recordId),
+    h3: headingComponent("h3", headingIds, recordId),
+  };
+
+  renderToStaticMarkup(
+    React.createElement(
+      Markdown,
+      { remarkPlugins: [remarkGfm], components },
+      body,
+    ),
+  );
+  return renderedIds;
+}
+
 function createIdAllocator(reservedIds) {
   const used = new Set(reservedIds);
   return function allocateId(base) {
@@ -124,7 +144,7 @@ function createIdAllocator(reservedIds) {
   };
 }
 
-function headingComponent(tagName, headingIds) {
+function headingComponent(tagName, headingIds, onHeading = undefined) {
   return function Heading({ children }) {
     const text = textContent(children);
     const nextIndex = headingIds.findIndex(
@@ -135,6 +155,7 @@ function headingComponent(tagName, headingIds) {
       nextIndex >= 0
         ? headingIds.splice(nextIndex, 1)[0]
         : { id: slugify(text) };
+    onHeading?.(heading.id);
     return React.createElement(tagName, { id: heading.id }, children);
   };
 }

@@ -10,6 +10,7 @@ import {
   truncateSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,6 +29,8 @@ import type {
 } from "../src/index.mjs";
 import * as core from "../src/index.mjs";
 
+const require = createRequire(import.meta.url);
+const { JSDOM } = require("jsdom");
 const roots: string[] = [];
 
 afterEach(() => {
@@ -435,6 +438,84 @@ describe("buildNote", () => {
     expect(readFileSync(secondOutput, "utf8")).toBe(
       readFileSync(outputPath, "utf8"),
     );
+    expect(verifyArtifactHtml(readFileSync(outputPath, "utf8"))).toMatchObject({
+      ok: true,
+      contractVersion: 2,
+    });
+  });
+
+  it("reserves every rendered heading ID before allocating flow identifiers", async () => {
+    const root = temporaryRoot();
+    const inputPath = join(root, "rendered-heading-collisions.md");
+    const outputPath = join(root, "rendered-heading-collisions.html");
+    writeFileSync(
+      inputPath,
+      [
+        "Flow Diagram Title 1",
+        "====",
+        "",
+        "```flow",
+        "flowchart LR",
+        "A[One] --> B[Two]",
+        "```",
+        "",
+        "> # Flow Arrow",
+        "",
+        "```mermaid",
+        "flowchart TD",
+        "C[Three] --> D[Four]",
+        "```",
+        "",
+        "   # Flow Diagram Title 2",
+      ].join("\n"),
+    );
+    let articleHtml = "";
+    let returnedHeadings: ThemeRenderInput["content"]["headings"];
+
+    await buildNote({
+      inputPath,
+      outputPath,
+      theme: safeTheme((input) => {
+        articleHtml = input.content.articleHtml ?? "";
+        returnedHeadings = input.content.headings;
+        return {
+          lang: input.metadata.lang,
+          styles: "",
+          bodyHtml: `<main>${articleHtml}</main>`,
+        };
+      }),
+    });
+
+    const dom = new JSDOM(articleHtml);
+    try {
+      const { document } = dom.window;
+      const ids = [...document.querySelectorAll("[id]")].map((element) => element.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids).toEqual(expect.arrayContaining([
+        "flow-diagram-title-1",
+        "flow-diagram-title-2",
+        "flow-arrow",
+      ]));
+
+      for (const svg of document.querySelectorAll("svg[aria-labelledby]")) {
+        const labelledBy = svg.getAttribute("aria-labelledby")?.split(/\s+/) ?? [];
+        expect(labelledBy.length).toBeGreaterThan(0);
+        for (const id of labelledBy) {
+          expect(document.getElementById(id)?.closest("svg")).toBe(svg);
+        }
+      }
+      for (const edge of document.querySelectorAll("[marker-end]")) {
+        const reference = edge.getAttribute("marker-end")?.match(/^url\(#([^)]+)\)$/);
+        expect(reference).not.toBeNull();
+        expect(document.getElementById(reference![1])?.closest("svg")).toBe(
+          edge.closest("svg"),
+        );
+      }
+    } finally {
+      dom.window.close();
+    }
+
+    expect(returnedHeadings).toEqual([]);
     expect(verifyArtifactHtml(readFileSync(outputPath, "utf8"))).toMatchObject({
       ok: true,
       contractVersion: 2,
