@@ -265,9 +265,13 @@ function collectStaticValue(value, values) {
 function decodedTypeScriptValues(source, path) {
   const values = [];
   const credentials = [];
-  const scriptKind = /\.(?:cjs|js|jsx|mjs)$/iu.test(path)
-    ? ts.ScriptKind.JS
-    : ts.ScriptKind.TS;
+  const scriptKind = path.endsWith(".tsx")
+    ? ts.ScriptKind.TSX
+    : path.endsWith(".jsx")
+      ? ts.ScriptKind.JSX
+      : /\.(?:cjs|js|mjs)$/iu.test(path)
+        ? ts.ScriptKind.JS
+        : ts.ScriptKind.TS;
   const sourceFile = ts.createSourceFile(
     path,
     source,
@@ -284,21 +288,41 @@ function decodedTypeScriptValues(source, path) {
       credentials.push(value);
     }
   };
+  const populateLexicalBindings = (statements, scope) => {
+    const immutableBindings = [];
+    for (const statement of statements) {
+      if (!ts.isVariableStatement(statement)) continue;
+      const isConst = (statement.declarationList.flags & ts.NodeFlags.Const) !== 0;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name)) continue;
+        scope.set(declaration.name.text, unknownStaticValue);
+        if (isConst) immutableBindings.push(declaration);
+      }
+    }
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const declaration of immutableBindings) {
+        if (scope.get(declaration.name.text) !== unknownStaticValue) continue;
+        const value = staticValue(declaration.initializer, scope);
+        if (value !== undefined) {
+          scope.set(declaration.name.text, value);
+          changed = true;
+        }
+      }
+    }
+  };
   const visit = (node, scope) => {
     if (ts.isSourceFile(node) || ts.isBlock(node)) {
       const childScope = new Map(scope);
+      populateLexicalBindings(node.statements, childScope);
       for (const statement of node.statements) {
         if (ts.isVariableStatement(statement)) {
-          const isConst = (statement.declarationList.flags & ts.NodeFlags.Const) !== 0;
           for (const declaration of statement.declarationList.declarations) {
             const value = staticValue(declaration.initializer, childScope);
             collectStaticValue(value, values);
             if (ts.isIdentifier(declaration.name)) {
               inspectCredential(declaration.name.text, value);
-              childScope.set(
-                declaration.name.text,
-                isConst && value !== undefined ? value : unknownStaticValue,
-              );
             }
             if (declaration.initializer !== undefined) {
               ts.forEachChild(declaration.initializer, (child) => visit(child, childScope));

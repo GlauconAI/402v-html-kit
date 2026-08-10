@@ -192,6 +192,35 @@ describe("package boundary hardening", () => {
     )).not.toThrow();
   });
 
+  it.each([
+    [
+      "direct concatenation",
+      'function probe() { const endpoint = prefix + "v.com"; } const prefix = "402";',
+    ],
+    [
+      "array join",
+      'function probe() { const endpoint = [prefix, "abase"].join(""); } const prefix = "Sup";',
+    ],
+  ])("resolves later outer const bindings in earlier closures for %s", (_label, source) => {
+    expect(() => inspect(source)).toThrow();
+  });
+
+  it("uses later same-scope const bindings as lexical shadows", () => {
+    expect(() => inspect(
+      'const prefix = "402"; function probe() { const endpoint = prefix + "v.com"; const prefix = "safe"; }',
+    )).not.toThrow();
+    expect(() => inspect(
+      'const prefix = "safe"; function probe() { const endpoint = prefix + "v.com"; const prefix = "402"; }',
+    )).toThrow();
+  });
+
+  it.each([
+    ["JSX", "src/probe.jsx", 'export const view = <div data-label="safe">safe</div>;'],
+    ["TSX", "src/probe.tsx", 'export const view: JSX.Element = <div data-label="safe">safe</div>;'],
+  ])("parses valid %s using its matching script kind", (_label, path, source) => {
+    expect(() => inspect(source, { path })).not.toThrow();
+  });
+
   it("parses package JavaScript without evaluating it", () => {
     delete (globalThis as Record<string, unknown>).__packSmokeExecuted;
     inspect("globalThis.__packSmokeExecuted = true;");
