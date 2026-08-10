@@ -39,19 +39,37 @@ export function renderFlowDiagram(
   const height = maximumY + MARGIN;
   const markup = [];
   let projectedBytes = 0;
-  const append = (fragment) => {
-    projectedBytes += Buffer.byteLength(fragment, "utf8");
-    if (projectedBytes > resourceLimits.svgBytes) {
+  const reserve = (bytes) => {
+    if (projectedBytes + bytes > resourceLimits.svgBytes) {
       failResource("Flow SVG exceeds its projected byte limit");
     }
+    projectedBytes += bytes;
+  };
+  const append = (fragment) => {
+    reserve(Buffer.byteLength(fragment, "utf8"));
     markup.push(fragment);
+  };
+  const appendXml = (value) => {
+    const string = String(value);
+    let escapedBytes = 0;
+    for (const codePoint of string) {
+      escapedBytes += Buffer.byteLength(xmlToken(codePoint), "utf8");
+    }
+    reserve(escapedBytes);
+    markup.push(escapeXml(string));
   };
 
   append(`<figure class="flow-diagram" data-diagram="flowchart">
-  <svg role="img" aria-labelledby="${escapeXml(titleId)}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
-    <title id="${escapeXml(titleId)}">Flow diagram</title>
+  <svg role="img" aria-labelledby="`);
+  appendXml(titleId);
+  append(`" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+    <title id="`);
+  appendXml(titleId);
+  append(`">Flow diagram</title>
     <defs>
-      <marker id="${escapeXml(markerId)}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <marker id="`);
+  appendXml(markerId);
+  append(`" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
         <path d="M0,0 L8,4 L0,8 z"/>
       </marker>
     </defs>
@@ -63,10 +81,15 @@ export function renderFlowDiagram(
     const end = nodeAnchor(to, from, direction);
     const labelX = (start.x + end.x) / 2;
     const labelY = (start.y + end.y) / 2 - 8;
-    const label = edge.label
-      ? `<text class="flow-edge-label" x="${labelX}" y="${labelY}" text-anchor="middle">${escapeXml(edge.label)}</text>`
-      : "";
-    append(`<g class="flow-edge"><path d="M ${start.x} ${start.y} L ${end.x} ${end.y}" marker-end="url(#${escapeXml(markerId)})"/>${label}</g>`);
+    append(`<g class="flow-edge"><path d="M ${start.x} ${start.y} L ${end.x} ${end.y}" marker-end="url(#`);
+    appendXml(markerId);
+    append(`)"/>`);
+    if (edge.label) {
+      append(`<text class="flow-edge-label" x="${labelX}" y="${labelY}" text-anchor="middle">`);
+      appendXml(edge.label);
+      append("</text>");
+    }
+    append("</g>");
   }
   append("\n    ");
   for (const position of positions) {
@@ -75,11 +98,15 @@ export function renderFlowDiagram(
     const labelLines = wrapLabel(node.label, 22);
     const firstY =
       position.y + NODE_HEIGHT / 2 - ((labelLines.length - 1) * 17) / 2;
-    let text = "";
+    append(`<g class="flow-node flow-node-${node.shape}" data-node-id="`);
+    appendXml(position.id);
+    append(`">${shape}<text text-anchor="middle">`);
     for (let index = 0; index < labelLines.length; index += 1) {
-      text += `<tspan x="${position.x + NODE_WIDTH / 2}" y="${firstY + index * 17}">${escapeXml(labelLines[index])}</tspan>`;
+      append(`<tspan x="${position.x + NODE_WIDTH / 2}" y="${firstY + index * 17}">`);
+      appendXml(labelLines[index]);
+      append("</tspan>");
     }
-    append(`<g class="flow-node flow-node-${node.shape}" data-node-id="${escapeXml(position.id)}">${shape}<text text-anchor="middle">${text}</text></g>`);
+    append("</text></g>");
   }
   append(`
   </svg>
@@ -278,8 +305,17 @@ function wrapLabel(label, length) {
   return lines.slice(0, 3);
 }
 
+function xmlToken(codePoint) {
+  if (codePoint === "&") return "&amp;";
+  if (codePoint === "<") return "&lt;";
+  if (codePoint === ">") return "&gt;";
+  if (codePoint === '"') return "&quot;";
+  if (codePoint === "'") return "&#39;";
+  return codePoint;
+}
+
 function escapeXml(value) {
-  return String(value)
+  return value
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")

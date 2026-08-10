@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   truncateSync,
@@ -743,6 +744,50 @@ describe("buildNote", () => {
     }));
   });
 
+  it.each([
+    ["edge", "A[One] -->|&&&&| B[Two]"],
+    ["node", "A[&&&&] --> B[Two]"],
+  ])("rejects an over-budget escaped %s label before materializing it", (_kind, source) => {
+    const target = "&&&&";
+    const escapedTarget = "&amp;&amp;&amp;&amp;";
+    const baseline = renderFlowDiagram(source);
+    const targetOffset = baseline.indexOf(escapedTarget);
+    expect(targetOffset).toBeGreaterThan(0);
+    const svgBytes = Buffer.byteLength(baseline.slice(0, targetOffset), "utf8");
+    const originalReplaceAll = String.prototype.replaceAll;
+    let escapedWholeLabel = false;
+
+    Object.defineProperty(String.prototype, "replaceAll", {
+      configurable: true,
+      writable: true,
+      value(this: string, searchValue: string | RegExp, replaceValue: string) {
+        if (String(this) === target) escapedWholeLabel = true;
+        return Reflect.apply(originalReplaceAll, String(this), [
+          searchValue,
+          replaceValue,
+        ]);
+      },
+    });
+    try {
+      expect(() =>
+        renderFlowDiagram(source, {
+          resourceLimits: { ...ARTIFACT_RESOURCE_LIMITS, svgBytes },
+        })
+      ).toThrowError(expect.objectContaining({
+        name: "ArtifactBuildError",
+        code: "RESOURCE_LIMIT_EXCEEDED",
+      }));
+    } finally {
+      Object.defineProperty(String.prototype, "replaceAll", {
+        configurable: true,
+        writable: true,
+        value: originalReplaceAll,
+      });
+    }
+
+    expect(escapedWholeLabel).toBe(false);
+  });
+
   it("preserves flow layout across LF, CRLF, and CR line endings", () => {
     const source = "flowchart LR\nA[One] --> B[Two]";
     const baseline = renderFlowDiagram(source);
@@ -944,16 +989,26 @@ describe("buildNote", () => {
 
   it("passes a hard cap to an injected image reader and preserves its limit failure", () => {
     let maximumBytes: number | undefined;
+    let expectedIdentity: unknown;
+    const inspected = {
+      isFile: () => true,
+      size: 3,
+      dev: 11,
+      ino: 22,
+      mtimeMs: 33,
+      ctimeMs: 44,
+    };
     let caught: unknown;
     try {
       renderMarkdown("![private](race.png)", {
         sourceDirectory: "/PRIVATE_DIRECTORY",
         imageIo: {
           stat() {
-            return { isFile: () => true, size: 3 };
+            return inspected;
           },
-          readFile(_path: string, maximum: number) {
+          readFile(_path: string, maximum: number, expected: unknown) {
             maximumBytes = maximum;
+            expectedIdentity = expected;
             throw new ArtifactBuildError(
               "RESOURCE_LIMIT_EXCEEDED",
               "Local Markdown image exceeds its byte limit",
@@ -966,6 +1021,7 @@ describe("buildNote", () => {
     }
 
     expect(maximumBytes).toBe(10 * 1024 * 1024);
+    expect(expectedIdentity).toBe(inspected);
     expect(caught).toMatchObject({
       name: "ArtifactBuildError",
       code: "RESOURCE_LIMIT_EXCEEDED",
@@ -1000,6 +1056,41 @@ describe("buildNote", () => {
     expect(caught).toMatchObject({
       name: "ArtifactBuildError",
       code: "RESOURCE_LIMIT_EXCEEDED",
+    });
+    expect(readdirSync("/dev/fd").length).toBe(descriptorsBefore);
+    expect(JSON.stringify((caught as ArtifactBuildError).toJSON())).not.toContain(
+      root,
+    );
+  });
+
+  it("rejects a same-size image inode replacement before reading content", () => {
+    const root = temporaryRoot();
+    const imagePath = join(root, "race.png");
+    const replacementPath = join(root, "replacement.png");
+    writeFileSync(imagePath, Buffer.from([0x01, 0x02, 0x03]));
+    const descriptorsBefore = readdirSync("/dev/fd").length;
+    let caught: unknown;
+
+    try {
+      renderMarkdown("![private](race.png)", {
+        sourceDirectory: root,
+        imageIo: {
+          stat(path: string) {
+            const inspected = statSync(path);
+            writeFileSync(replacementPath, Buffer.from([0x04, 0x05, 0x06]));
+            renameSync(replacementPath, path);
+            return inspected;
+          },
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      name: "ArtifactBuildError",
+      code: "IMAGE_READ_FAILED",
+      details: { operation: "read" },
     });
     expect(readdirSync("/dev/fd").length).toBe(descriptorsBefore);
     expect(JSON.stringify((caught as ArtifactBuildError).toJSON())).not.toContain(

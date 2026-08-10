@@ -29,13 +29,13 @@ const MAX_HEADING_ID_BYTES = 256;
 const IMAGE_READ_CHUNK_BYTES = 64 * 1024;
 /**
  * @type {Readonly<{
- *   readFile(path: string, maximumBytes: number): Buffer,
+ *   readFile(path: string, maximumBytes: number, expectedStats: object): Buffer,
  *   stat(path: string): { isFile(): boolean, size: number },
  * }>}
  */
 const DEFAULT_IMAGE_IO = Object.freeze({
-  readFile(path, maximumBytes) {
-    return readLocalImageBounded(path, maximumBytes);
+  readFile(path, maximumBytes, expectedStats) {
+    return readLocalImageBounded(path, maximumBytes, expectedStats);
   },
   stat(path) {
     return statSync(path);
@@ -189,7 +189,7 @@ export function renderMarkdown(
   return { articleHtml, headings };
 }
 
-function readLocalImageBounded(path, maximumBytes) {
+function readLocalImageBounded(path, maximumBytes, expectedStats) {
   let descriptor;
   try {
     descriptor = openSync(path, "r");
@@ -208,6 +208,11 @@ function readLocalImageBounded(path, maximumBytes) {
         "RESOURCE_LIMIT_EXCEEDED",
         "Local Markdown image exceeds its byte limit",
       );
+    }
+    if (!sameImageStat(expectedStats, before)) {
+      fail("IMAGE_READ_FAILED", "Local Markdown image changed before reading", {
+        operation: "read",
+      });
     }
 
     const chunks = [];
@@ -260,6 +265,18 @@ function readLocalImageBounded(path, maximumBytes) {
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
+}
+
+function sameImageStat(expected, actual) {
+  return (
+    expected !== null &&
+    typeof expected === "object" &&
+    typeof expected.isFile === "function" &&
+    expected.isFile() &&
+    ["dev", "ino", "mode", "size", "mtimeMs", "ctimeMs"].every(
+      (field) => expected[field] === actual[field],
+    )
+  );
 }
 
 function createIdAllocator() {
@@ -429,7 +446,7 @@ function resolveImage(
   reserveEmbeddedImage(renderBudget, resourceLimits, projectedBytes);
   let bytes;
   try {
-    bytes = imageIo.readFile(path, MAX_LOCAL_IMAGE_BYTES);
+    bytes = imageIo.readFile(path, MAX_LOCAL_IMAGE_BYTES, stats);
   } catch (cause) {
     if (
       cause instanceof ArtifactBuildError &&
