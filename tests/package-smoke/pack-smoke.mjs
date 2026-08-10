@@ -1,4 +1,6 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { TextDecoder } from "node:util";
 import { gunzipSync } from "node:zlib";
 import {
   chmodSync,
@@ -13,8 +15,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { parse as parseJavaScript } from "acorn";
 
 const workspaceRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -104,11 +108,11 @@ const allowedLicenses = new Set([
 const forbiddenPayloadPatterns = Object.freeze([
   ["Supabase", /Supabase/giu],
   ["Vercel", /Vercel/giu],
-  ["NEXT_PUBLIC_", /NEXT_PUBLIC_/gu],
-  ["developer home path", /\/(?:Users|home)\/[A-Za-z0-9._-]+\//gu],
-  ["Windows developer home path", /[A-Za-z]:\\Users\\[A-Za-z0-9._-]+\\/gu],
+  ["NEXT_PUBLIC_", /NEXT_PUBLIC_/giu],
+  ["developer home path", /\/(?:Users|home)\/[^/\r\n]+(?:\/|$)/gu],
+  ["Windows developer home path", /[A-Za-z]:\\Users\\[^\\\r\n]+(?:\\|$)/gu],
   ["local file URL", /file:\/\/\/(?:Users|home|private|tmp|var)\//gu],
-  ["temporary host path", /\/(?:private\/)?tmp\/[A-Za-z0-9._-]+/gu],
+  ["temporary host path", /\/(?:private\/)?tmp\/[^/\r\n]+/gu],
   ["macOS temporary host path", /\/var\/folders\/[A-Za-z0-9._/-]+/gu],
   ["private key", /-----BEGIN (?:EC |OPENSSH |RSA )?PRIVATE KEY-----/gu],
   ["AWS access key", /AKIA[0-9A-Z]{16}/gu],
@@ -116,7 +120,7 @@ const forbiddenPayloadPatterns = Object.freeze([
   ["Slack token", /xox[a-z]-[A-Za-z0-9-]{10,}/giu],
   [
     "literal credential",
-    /(?:api[_-]?key|password|secret)\s*[:=]\s*["'][^"'\n$]{8,}["']/giu,
+    /(?:api[_-]?key|password|secret)\s*[:=]\s*["'](?!\$\{[A-Za-z_][A-Za-z0-9_]*\}["'])[^"'\n]{8,}["']/giu,
   ],
 ]);
 const reviewedThemeBrandAnchor =
@@ -128,6 +132,276 @@ const reviewedThemeBrandFiles = new Set([
 
 function fail(message) {
   throw new Error(message);
+}
+
+const inheritedEnvironmentAllowlist = new Set([
+  "APPDATA",
+  "ComSpec",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LOCALAPPDATA",
+  "PATH",
+  "PATHEXT",
+  "SystemRoot",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "USERPROFILE",
+  "WINDIR",
+]);
+const explicitEnvironmentAllowlist = new Set([
+  "NO_COLOR",
+  "npm_config_cache",
+  "npm_config_globalconfig",
+  "npm_config_ignore_scripts",
+  "npm_config_loglevel",
+  "npm_config_offline",
+  "npm_config_prefix",
+  "npm_config_userconfig",
+]);
+
+export function sanitizedEnvironment(inherited = process.env, overrides = {}) {
+  const environment = {};
+  for (const [key, value] of Object.entries(inherited)) {
+    if (value !== undefined && inheritedEnvironmentAllowlist.has(key)) {
+      environment[key] = value;
+    }
+  }
+  for (const [key, value] of Object.entries(overrides)) {
+    if (
+      value !== undefined &&
+      (inheritedEnvironmentAllowlist.has(key) || explicitEnvironmentAllowlist.has(key))
+    ) {
+      environment[key] = String(value);
+    }
+  }
+  return environment;
+}
+
+function staticString(node, constants) {
+  if (node === null || typeof node !== "object") return undefined;
+  if (node.type === "Literal" && typeof node.value === "string") return node.value;
+  if (node.type === "Identifier") return constants.get(node.name);
+  if (node.type === "TemplateLiteral") {
+    let value = "";
+    for (let index = 0; index < node.quasis.length; index += 1) {
+      value += node.quasis[index].value.cooked ?? node.quasis[index].value.raw;
+      if (index < node.expressions.length) {
+        const expression = staticString(node.expressions[index], constants);
+        if (expression === undefined) return undefined;
+        value += expression;
+      }
+    }
+    return value;
+  }
+  if (node.type === "BinaryExpression" && node.operator === "+") {
+    const left = staticString(node.left, constants);
+    const right = staticString(node.right, constants);
+    return left === undefined || right === undefined ? undefined : left + right;
+  }
+  return undefined;
+}
+
+function propertyName(node) {
+  if (node?.type === "Identifier") return node.name;
+  if (node?.type === "Literal" && typeof node.value === "string") return node.value;
+  return undefined;
+}
+
+function sensitiveCredentialName(name) {
+  return typeof name === "string" && /^(?:api[_-]?key|password|secret)$/iu.test(name);
+}
+
+function safeInterpolation(value) {
+  return /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/u.test(value);
+}
+
+function walkJavaScript(node, visit) {
+  if (node === null || typeof node !== "object") return;
+  visit(node);
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "start" || key === "end" || key === "loc") continue;
+    if (Array.isArray(value)) {
+      for (const child of value) walkJavaScript(child, visit);
+    } else if (value !== null && typeof value === "object" && typeof value.type === "string") {
+      walkJavaScript(value, visit);
+    }
+  }
+}
+
+function decodedDocumentValues(source, path) {
+  const values = [];
+  const credentials = [];
+  if (path.endsWith(".json") || path === "package.json") {
+    const document = JSON.parse(source);
+    const visit = (value, key) => {
+      if (typeof value === "string") {
+        values.push(value);
+        if (sensitiveCredentialName(key)) credentials.push(value);
+      } else if (Array.isArray(value)) {
+        for (const item of value) visit(item, undefined);
+      } else if (value !== null && typeof value === "object") {
+        for (const [childKey, child] of Object.entries(value)) visit(child, childKey);
+      }
+    };
+    visit(document, undefined);
+    return { credentials, values };
+  }
+  if (!/\.(?:cjs|mjs)$/iu.test(path)) return { credentials, values };
+  const program = parseJavaScript(source, {
+    ecmaVersion: "latest",
+    sourceType: path.endsWith(".cjs") ? "script" : "module",
+  });
+  const constants = new Map();
+  for (const statement of program.body) {
+    if (statement.type !== "VariableDeclaration" || statement.kind !== "const") continue;
+    for (const declaration of statement.declarations) {
+      if (declaration.id.type !== "Identifier") continue;
+      const value = staticString(declaration.init, constants);
+      if (value !== undefined) constants.set(declaration.id.name, value);
+    }
+  }
+  walkJavaScript(program, (node) => {
+    const value = staticString(node, constants);
+    if (value !== undefined) values.push(value);
+    if (node.type === "VariableDeclarator" && sensitiveCredentialName(propertyName(node.id))) {
+      const credential = staticString(node.init, constants);
+      if (credential !== undefined) credentials.push(credential);
+    }
+    if (node.type === "Property" && sensitiveCredentialName(propertyName(node.key))) {
+      const credential = staticString(node.value, constants);
+      if (credential !== undefined) credentials.push(credential);
+    }
+    if (node.type === "AssignmentExpression") {
+      const name = node.left.type === "MemberExpression"
+        ? propertyName(node.left.property)
+        : propertyName(node.left);
+      if (sensitiveCredentialName(name)) {
+        const credential = staticString(node.right, constants);
+        if (credential !== undefined) credentials.push(credential);
+      }
+    }
+  });
+  return { credentials, values };
+}
+
+function scanForbiddenValue(packageName, path, value, decoded = false) {
+  if (
+    decoded &&
+    (/^\/(?!\/)(?:[^/\0\r\n]+\/)+[^/\0\r\n]*$/u.test(value) ||
+      /^[A-Za-z]:\\(?:[^\\\0\r\n]+\\)+[^\\\0\r\n]*$/u.test(value))
+  ) {
+    fail(`absolute host path found in ${packageName}/${path}`);
+  }
+  if (/402v\.com/iu.test(value)) {
+    fail(`Unreviewed 402v.com occurrence in ${packageName}/${path}`);
+  }
+  for (const [label, pattern] of forbiddenPayloadPatterns) {
+    pattern.lastIndex = 0;
+    if (pattern.test(value)) fail(`${label} found in ${packageName}/${path}`);
+  }
+}
+
+export function inspectPublishedText({
+  packageName,
+  path,
+  content,
+  reviewedBrandFiles,
+}) {
+  let source;
+  try {
+    source = new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    fail(`Invalid UTF-8 in ${packageName}/${path}`);
+  }
+  const reviewedPath =
+    packageName === "@402v/theme-402v" && reviewedThemeBrandFiles.has(path);
+  if (reviewedPath) {
+    if (source.split(reviewedThemeBrandAnchor).length !== 2) {
+      fail(`Reviewed theme brand href changed in ${path}`);
+    }
+    reviewedBrandFiles?.add(path);
+    source = source.replace(reviewedThemeBrandAnchor, "");
+  }
+  const decoded = decodedDocumentValues(source, path);
+  scanForbiddenValue(packageName, path, source);
+  for (const value of decoded.values) scanForbiddenValue(packageName, path, value, true);
+  for (const credential of decoded.credentials) {
+    if (credential.length >= 8 && !safeInterpolation(credential)) {
+      fail(`literal credential found in ${packageName}/${path}`);
+    }
+  }
+  return { reviewedBrandAnchor: reviewedPath };
+}
+
+export function installedBinaryPlan({
+  binaryBase,
+  packageEntry,
+  platform = process.platform,
+  nodeExecutable = process.execPath,
+}) {
+  if (platform === "win32") {
+    return {
+      executable: nodeExecutable,
+      packageEntry,
+      platform,
+      prefixArgs: [packageEntry],
+      shimPath: `${binaryBase}.cmd`,
+      verifiesCmdShim: true,
+    };
+  }
+  return {
+    executable: binaryBase,
+    packageEntry,
+    platform,
+    prefixArgs: [],
+    shimPath: binaryBase,
+    nodeExecutable,
+  };
+}
+
+export function binaryCommandArguments(plan, args) {
+  return [...plan.prefixArgs, ...args];
+}
+
+export function verifyWindowsCmdShim(content) {
+  let shim;
+  try {
+    shim = new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    fail("Installed Windows cmd shim is not valid UTF-8");
+  }
+  if (!/@402v[\\/]html-kit-cli[\\/]src[\\/]cli\.mjs/iu.test(shim)) {
+    fail("Installed Windows cmd shim does not target the packed CLI entry");
+  }
+}
+
+export function hashArchive(archive, algorithm) {
+  return createHash(algorithm).update(archive).digest();
+}
+
+export function verifyArchiveIntegrity(archive, integrity) {
+  const match = integrity?.match(/^([a-z0-9]+)-(.+)$/iu);
+  if (match === null || match === undefined) fail("Invalid archive integrity");
+  const expected = Buffer.from(match[2], "base64");
+  const actual = hashArchive(archive, match[1]);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+    fail("Archive integrity does not match packed bytes");
+  }
+}
+
+export function validatePackFilename({ filename, name, tarballRoot, version }) {
+  const expected = `${name.replace(/^@/u, "").replace("/", "-")}-${version}.tgz`;
+  const candidate = resolve(tarballRoot, filename);
+  if (
+    filename !== expected ||
+    basename(filename) !== filename ||
+    !contained(tarballRoot, candidate)
+  ) {
+    fail(`Unexpected npm pack filename for ${name}: ${filename}`);
+  }
+  return candidate;
 }
 
 function normalizedRelative(from, to) {
@@ -143,32 +417,126 @@ function contained(root, candidate) {
   );
 }
 
-function command(executable, args, options = {}) {
-  const result = spawnSync(executable, args, {
-    cwd: options.cwd ?? workspaceRoot,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      NODE_PATH: "",
-      NO_COLOR: "1",
-      ...options.env,
-    },
-    timeout: options.timeout ?? 120_000,
-  });
-  if (result.error !== undefined) {
-    fail(`${executable} could not run: ${result.error.message}`);
+const activeChildren = new Set();
+let runDeadline = Number.POSITIVE_INFINITY;
+let shutdownError;
+
+class SmokeExitError extends Error {
+  constructor(message, exitCode) {
+    super(message);
+    this.exitCode = exitCode;
   }
-  if (result.status !== 0) {
-    fail(
-      `${executable} ${args.join(" ")} exited ${result.status}\n` +
-      `${result.stdout}${result.stderr}`,
-    );
-  }
-  return result;
 }
 
-function jsonCommand(executable, args, cwd) {
-  const result = command(executable, args, { cwd });
+function assertRunActive() {
+  if (shutdownError !== undefined) throw shutdownError;
+  if (Date.now() >= runDeadline) {
+    throw new SmokeExitError("Package smoke global deadline exceeded", 124);
+  }
+}
+
+async function signalChildTree(child, signal) {
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === "win32") {
+    await new Promise((resolvePromise) => {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        env: sanitizedEnvironment(),
+        stdio: "ignore",
+      });
+      killer.once("error", resolvePromise);
+      killer.once("close", resolvePromise);
+    });
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // A concurrent child exit is already the requested state.
+    }
+  }
+}
+
+async function terminateActiveChildren() {
+  await Promise.all([...activeChildren].map((child) => signalChildTree(child, "SIGTERM")));
+  if (activeChildren.size === 0) return;
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+  await Promise.all([...activeChildren].map((child) => signalChildTree(child, "SIGKILL")));
+}
+
+async function command(executable, args, options = {}) {
+  if (shutdownError !== undefined) throw shutdownError;
+  const remaining = runDeadline - Date.now();
+  if (remaining <= 0) throw new SmokeExitError("Package smoke global deadline exceeded", 124);
+  const timeout = Math.max(1, Math.min(options.timeout ?? 120_000, remaining));
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(executable, args, {
+      cwd: options.cwd ?? workspaceRoot,
+      detached: process.platform !== "win32",
+      env: sanitizedEnvironment(process.env, {
+        NO_COLOR: "1",
+        ...options.env,
+      }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    activeChildren.add(child);
+    options.onSpawn?.(child);
+    const stdout = [];
+    const stderr = [];
+    let outputBytes = 0;
+    let timedOut = false;
+    const capture = (chunks) => (chunk) => {
+      outputBytes += chunk.length;
+      if (outputBytes > 4 * 1024 * 1024) {
+        timedOut = true;
+        void signalChildTree(child, "SIGTERM");
+        return;
+      }
+      chunks.push(chunk);
+    };
+    child.stdout.on("data", capture(stdout));
+    child.stderr.on("data", capture(stderr));
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void signalChildTree(child, "SIGTERM");
+      setTimeout(() => void signalChildTree(child, "SIGKILL"), 200).unref();
+    }, timeout);
+    timer.unref();
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      activeChildren.delete(child);
+      rejectPromise(new Error(`${executable} could not run: ${error.message}`));
+    });
+    child.once("close", (status, signal) => {
+      clearTimeout(timer);
+      activeChildren.delete(child);
+      const result = {
+        status,
+        signal,
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        stdout: Buffer.concat(stdout).toString("utf8"),
+      };
+      if (shutdownError !== undefined) {
+        rejectPromise(shutdownError);
+      } else if (timedOut) {
+        rejectPromise(new SmokeExitError(`${executable} exceeded its timeout`, 124));
+      } else if (status !== 0) {
+        rejectPromise(new Error(
+          `${executable} ${args.join(" ")} exited ${status ?? signal}\n` +
+          `${result.stdout}${result.stderr}`,
+        ));
+      } else {
+        resolvePromise(result);
+      }
+    });
+  });
+}
+
+async function jsonCommand(executable, args, cwd, plan) {
+  const commandArgs = plan === undefined ? args : binaryCommandArguments(plan, args);
+  const result = await command(executable, commandArgs, { cwd });
   if (result.stderr !== "") {
     fail(`${executable} wrote to stderr: ${result.stderr}`);
   }
@@ -184,6 +552,7 @@ function jsonCommand(executable, args, cwd) {
 function readTarEntries(tarballPath) {
   const archive = gunzipSync(readFileSync(tarballPath));
   const entries = [];
+  const directories = [];
   let offset = 0;
   while (offset + 512 <= archive.length) {
     const header = archive.subarray(offset, offset + 512);
@@ -213,12 +582,17 @@ function readTarEntries(tarballPath) {
     const type = String.fromCharCode(header[156] || 48);
     if (type === "0") {
       entries.push({ path, mode, content: archive.subarray(bodyStart, bodyEnd) });
-    } else if (type !== "5") {
+    } else if (type === "5") {
+      directories.push({ path, mode });
+    } else {
       fail(`Unsupported tar entry type ${type} for ${path}`);
     }
     offset = bodyStart + Math.ceil(size / 512) * 512;
   }
-  return entries;
+  if (archive.subarray(offset).some((byte) => byte !== 0)) {
+    fail("Tarball contains non-zero trailing bytes");
+  }
+  return { directories, entries };
 }
 
 function assertSafeArchivePath(path) {
@@ -242,27 +616,28 @@ function assertSafeArchivePath(path) {
 }
 
 function scanPackedText(packageName, path, content, reviewedBrandFiles) {
-  let source = content.toString("utf8");
-  if (packageName === "@402v/theme-402v" && reviewedThemeBrandFiles.has(path)) {
-    if (source.split(reviewedThemeBrandAnchor).length !== 2) {
-      fail(`Reviewed theme brand href changed in ${path}`);
-    }
-    reviewedBrandFiles.add(path);
-    source = source.replace(reviewedThemeBrandAnchor, "");
-  }
-  if (/402v\.com/iu.test(source)) {
-    fail(`Unreviewed 402v.com occurrence in ${packageName}/${path}`);
-  }
-  for (const [label, pattern] of forbiddenPayloadPatterns) {
-    pattern.lastIndex = 0;
-    if (pattern.test(source)) fail(`${label} found in ${packageName}/${path}`);
-  }
+  inspectPublishedText({ packageName, path, content, reviewedBrandFiles });
 }
 
 function inspectTarball(definition, details, tarballRoot) {
   if (details.name !== definition.name) {
     fail(`npm pack returned ${details.name} for ${definition.name}`);
   }
+  const manifest = JSON.parse(
+    readFileSync(join(workspaceRoot, definition.workspace, "package.json"), "utf8"),
+  );
+  if (details.version !== manifest.version) {
+    fail(`npm pack returned version ${details.version} for ${definition.name}`);
+  }
+  const tarballPath = validatePackFilename({
+    filename: details.filename,
+    name: definition.name,
+    tarballRoot,
+    version: manifest.version,
+  });
+  const archive = readFileSync(tarballPath);
+  if (archive.length !== details.size) fail(`Compressed size mismatch for ${definition.name}`);
+  verifyArchiveIntegrity(archive, details.integrity);
   const expected = [...definition.files].sort();
   const reported = details.files.map(({ path }) => path).sort();
   if (JSON.stringify(reported) !== JSON.stringify(expected)) {
@@ -273,17 +648,46 @@ function inspectTarball(definition, details, tarballRoot) {
   }
   for (const path of reported) assertSafeArchivePath(path);
 
-  const tarballPath = join(tarballRoot, details.filename);
-  const entries = readTarEntries(tarballPath);
+  if (details.entryCount !== expected.length || details.files.length !== expected.length) {
+    fail(`npm pack entry count mismatch for ${definition.name}`);
+  }
+  const { directories, entries } = readTarEntries(tarballPath);
+  const allowedDirectories = new Set(["package", "package/src"]);
+  const seenDirectories = new Set();
+  for (const directory of directories) {
+    const normalized = directory.path.replace(/\/$/u, "");
+    assertSafeArchivePath(normalized);
+    if (
+      seenDirectories.has(normalized) ||
+      !allowedDirectories.has(normalized) ||
+      (directory.mode & 0o022) !== 0
+    ) {
+      fail(`Unexpected or writable tar directory: ${directory.path}`);
+    }
+    seenDirectories.add(normalized);
+  }
   const reviewedBrandFiles = new Set();
   const payloadPaths = [];
+  const seenPaths = new Set();
+  let unpackedSize = 0;
   for (const entry of entries) {
     if (!entry.path.startsWith("package/")) {
       fail(`Tarball entry lacks package/ prefix: ${entry.path}`);
     }
     const path = entry.path.slice("package/".length);
     assertSafeArchivePath(path);
+    if (seenPaths.has(path)) fail(`Duplicate tar entry: ${path}`);
+    seenPaths.add(path);
     payloadPaths.push(path);
+    unpackedSize += entry.content.length;
+    const reportedEntry = details.files.find((file) => file.path === path);
+    if (
+      reportedEntry === undefined ||
+      reportedEntry.size !== entry.content.length ||
+      (reportedEntry.mode & 0o777) !== (entry.mode & 0o777)
+    ) {
+      fail(`Tar metadata differs from npm pack report for ${definition.name}/${path}`);
+    }
     scanPackedText(definition.name, path, entry.content, reviewedBrandFiles);
     if (
       definition.name === "@402v/html-kit-cli" &&
@@ -296,6 +700,17 @@ function inspectTarball(definition, details, tarballRoot) {
   payloadPaths.sort();
   if (JSON.stringify(payloadPaths) !== JSON.stringify(expected)) {
     fail(`${definition.name} tar payload differs from npm pack file report`);
+  }
+  if (unpackedSize !== details.unpackedSize) {
+    fail(`Unpacked size mismatch for ${definition.name}`);
+  }
+  const packedManifestEntry = entries.find(({ path }) => path === "package/package.json");
+  if (packedManifestEntry === undefined) fail(`Packed manifest missing for ${definition.name}`);
+  const packedManifest = JSON.parse(
+    new TextDecoder("utf-8", { fatal: true }).decode(packedManifestEntry.content),
+  );
+  if (packedManifest.name !== definition.name || packedManifest.version !== manifest.version) {
+    fail(`Packed manifest identity mismatch for ${definition.name}`);
   }
   if (
     definition.name === "@402v/theme-402v" &&
@@ -330,8 +745,10 @@ function cacheContentPath(cacheRoot, integrity) {
   );
 }
 
-function seedPrivateCache(sourceLock, privateCache) {
-  const hostCache = command("npm", ["config", "get", "cache"]).stdout.trim();
+async function seedPrivateCache(sourceLock, privateCache, npmHostEnvironment) {
+  const hostCache = (
+    await command("npm", ["config", "get", "cache"], { env: npmHostEnvironment })
+  ).stdout.trim();
   const productionEntries = {};
   for (const [path, entry] of Object.entries(sourceLock.packages)) {
     if (
@@ -443,41 +860,73 @@ await import("@402v/html-kit-cli");
 process.argv = originalArgv;
 process.stdout.write = originalWrite;
 if (!output.startsWith("402v HTML Kit")) process.exit(11);
+originalWrite(JSON.stringify({
+  environment: Object.fromEntries([
+    "INIT_CWD",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "NPM_CONFIG_CACHE",
+    "YARN_GLOBAL_FOLDER",
+    "npm_config_registry",
+  ].map((name) => [name, process.env[name] ?? null])),
+  resolutions: Object.fromEntries([
+    "@402v/html-kit-core",
+    "@402v/html-kit-cli",
+    "@402v/theme-402v",
+  ].map((name) => [name, import.meta.resolve(name)])),
+}));
 `,
   );
   return fixtureRoot;
 }
 
-function exerciseConsumer(consumerRoot) {
+async function exerciseConsumer(consumerRoot) {
   for (const name of packageNames) {
     const packageRoot = realpathSync(join(consumerRoot, "node_modules", ...name.split("/")));
     if (!contained(consumerRoot, packageRoot)) {
       fail(`Installed package resolves outside the clean consumer: ${name}`);
     }
   }
-  const binary = join(
+  const binaryBase = join(
     consumerRoot,
     "node_modules",
     ".bin",
-    process.platform === "win32" ? "402v-html-kit.cmd" : "402v-html-kit",
+    "402v-html-kit",
   );
-  const resolvedBinary = realpathSync(binary);
-  if (!contained(consumerRoot, resolvedBinary)) fail("CLI binary resolves outside consumer");
-  if (process.platform !== "win32" && (statSync(resolvedBinary).mode & 0o111) === 0) {
+  const packageEntry = realpathSync(join(
+    consumerRoot,
+    "node_modules",
+    "@402v",
+    "html-kit-cli",
+    "src",
+    "cli.mjs",
+  ));
+  const plan = installedBinaryPlan({
+    binaryBase,
+    packageEntry,
+  });
+  const resolvedShim = realpathSync(plan.shimPath);
+  if (!contained(consumerRoot, resolvedShim)) fail("CLI binary resolves outside consumer");
+  if (!contained(consumerRoot, packageEntry)) fail("CLI package entry resolves outside consumer");
+  if (process.platform !== "win32" && (statSync(resolvedShim).mode & 0o111) === 0) {
     fail("Installed CLI is not executable");
+  }
+  if (process.platform === "win32") {
+    verifyWindowsCmdShim(readFileSync(plan.shimPath));
   }
 
   const fixtureRoot = writeConsumerFixtures(consumerRoot);
-  jsonCommand(binary, ["build", "note.md", "--output", "note.html"], fixtureRoot);
-  jsonCommand(binary, ["verify", "note.html"], fixtureRoot);
-  jsonCommand(
-    binary,
+  await jsonCommand(plan.executable, ["build", "note.md", "--output", "note.html"], fixtureRoot, plan);
+  await jsonCommand(plan.executable, ["verify", "note.html"], fixtureRoot, plan);
+  await jsonCommand(
+    plan.executable,
     ["build-artifact", "artifact.mjs", "--output", "artifact.html"],
     fixtureRoot,
+    plan,
   );
-  jsonCommand(binary, ["verify", "artifact.html", "--required-block", "registry"], fixtureRoot);
-  jsonCommand(
-    binary,
+  await jsonCommand(plan.executable, ["verify", "artifact.html", "--required-block", "registry"], fixtureRoot, plan);
+  await jsonCommand(
+    plan.executable,
     [
       "update-data",
       "artifact.html",
@@ -489,9 +938,22 @@ function exerciseConsumer(consumerRoot) {
       "updated.json",
     ],
     fixtureRoot,
+    plan,
   );
-  jsonCommand(binary, ["verify", "artifact.html", "--required-block", "registry"], fixtureRoot);
-  command(process.execPath, [join(consumerRoot, "imports.mjs")], { cwd: consumerRoot });
+  await jsonCommand(plan.executable, ["verify", "artifact.html", "--required-block", "registry"], fixtureRoot, plan);
+  const imports = await command(process.execPath, [join(consumerRoot, "imports.mjs")], {
+    cwd: consumerRoot,
+  });
+  const importProbe = JSON.parse(imports.stdout);
+  for (const name of packageNames) {
+    const resolved = fileURLToPath(importProbe.resolutions[name]);
+    if (!contained(consumerRoot, resolved)) {
+      fail(`Programmatic import resolves outside the clean consumer: ${name}`);
+    }
+  }
+  if (Object.values(importProbe.environment).some((value) => value !== null)) {
+    fail("Resolution-affecting environment leaked into the consumer import probe");
+  }
   return true;
 }
 
@@ -550,91 +1012,193 @@ ${rows.join("\n")}
 `;
 }
 
-let temporaryRoot;
-try {
-  temporaryRoot = mkdtempSync(join(tmpdir(), "402v-pack-smoke-"));
-  const tarballRoot = join(temporaryRoot, "tarballs");
-  const consumerRoot = join(temporaryRoot, "consumer");
-  const privateCache = join(temporaryRoot, "npm-cache");
-  mkdirSync(tarballRoot);
-  mkdirSync(consumerRoot);
+async function runPackSmoke() {
+  const configuredTimeout = Number.parseInt(
+    process.env.PACK_SMOKE_GLOBAL_TIMEOUT_MS ?? "150000",
+    10,
+  );
+  if (!Number.isSafeInteger(configuredTimeout) || configuredTimeout < 100) {
+    fail("PACK_SMOKE_GLOBAL_TIMEOUT_MS must be an integer of at least 100");
+  }
+  runDeadline = Date.now() + configuredTimeout;
+  shutdownError = undefined;
+  let temporaryRoot;
+  let cleaned = false;
+  const cleanupExactRoot = async () => {
+    if (cleaned) return;
+    cleaned = true;
+    await terminateActiveChildren();
+    if (temporaryRoot !== undefined) {
+      try {
+        chmodSync(temporaryRoot, 0o700);
+      } catch {
+        // Recursive removal below reports any remaining cleanup failure.
+      }
+      rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 3 });
+      if (existsSync(temporaryRoot)) fail(`Temporary root cleanup failed: ${temporaryRoot}`);
+    }
+  };
+  const requestShutdown = (message, exitCode) => {
+    if (shutdownError === undefined) shutdownError = new SmokeExitError(message, exitCode);
+    void terminateActiveChildren();
+  };
+  const onSigint = () => requestShutdown("Package smoke interrupted by SIGINT", 130);
+  const onSigterm = () => requestShutdown("Package smoke interrupted by SIGTERM", 143);
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  const deadlineTimer = setTimeout(
+    () => requestShutdown("Package smoke global deadline exceeded", 124),
+    configuredTimeout,
+  );
+  deadlineTimer.unref();
 
-  const packed = new Map();
-  const packageSummaries = [];
-  for (const definition of packageDefinitions) {
-    const result = command(
+  try {
+    const temporaryParent = process.argv.includes("--cleanup-probe")
+      ? process.env.PACK_SMOKE_PROBE_PARENT
+      : tmpdir();
+    if (typeof temporaryParent !== "string" || !isAbsolute(temporaryParent)) {
+      fail("Cleanup probe requires an absolute PACK_SMOKE_PROBE_PARENT");
+    }
+    temporaryRoot = mkdtempSync(join(temporaryParent, "402v-pack-smoke-"));
+
+    if (process.argv.includes("--cleanup-probe")) {
+      const readyPath = process.env.PACK_SMOKE_PROBE_READY;
+      if (typeof readyPath !== "string" || !isAbsolute(readyPath)) {
+        fail("Cleanup probe requires an absolute PACK_SMOKE_PROBE_READY");
+      }
+      await command(
+        process.execPath,
+        [
+          "-e",
+          `const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+writeFileSync(process.argv[1], JSON.stringify({ childPid: process.pid, grandchildPid: grandchild.pid, root: process.argv[2] }));
+setInterval(() => {}, 1000);`,
+          readyPath,
+          temporaryRoot,
+        ],
+        {
+          cwd: temporaryRoot,
+          timeout: configuredTimeout * 2,
+        },
+      );
+      fail("Cleanup probe child exited unexpectedly");
+    }
+
+    const tarballRoot = join(temporaryRoot, "tarballs");
+    const consumerRoot = join(temporaryRoot, "consumer");
+    const privateCache = join(temporaryRoot, "npm-cache");
+    const privatePrefix = join(temporaryRoot, "npm-prefix");
+    const npmConfigRoot = join(temporaryRoot, "npm-config");
+    const userConfig = join(npmConfigRoot, "user.npmrc");
+    const globalConfig = join(npmConfigRoot, "global.npmrc");
+    mkdirSync(tarballRoot);
+    mkdirSync(consumerRoot);
+    mkdirSync(privatePrefix);
+    mkdirSync(npmConfigRoot);
+    writeFileSync(userConfig, "");
+    writeFileSync(globalConfig, "");
+    const npmHostEnvironment = {
+      npm_config_globalconfig: globalConfig,
+      npm_config_loglevel: "error",
+      npm_config_userconfig: userConfig,
+    };
+    const npmPrivateEnvironment = {
+      ...npmHostEnvironment,
+      npm_config_cache: privateCache,
+      npm_config_ignore_scripts: "true",
+      npm_config_prefix: privatePrefix,
+    };
+
+    const packed = new Map();
+    const packageSummaries = [];
+    for (const definition of packageDefinitions) {
+      const result = await command(
+        "npm",
+        [
+          "pack",
+          "--json",
+          "--ignore-scripts",
+          "--workspace",
+          definition.name,
+          "--pack-destination",
+          tarballRoot,
+        ],
+        { cwd: workspaceRoot, env: npmPrivateEnvironment },
+      );
+      if (result.stderr !== "") fail(`npm pack wrote to stderr: ${result.stderr}`);
+      const parsed = JSON.parse(result.stdout);
+      if (!Array.isArray(parsed) || parsed.length !== 1) {
+        fail(`npm pack returned an unexpected payload for ${definition.name}`);
+      }
+      const details = parsed[0];
+      packed.set(definition.name, details);
+      packageSummaries.push(inspectTarball(definition, details, tarballRoot));
+    }
+
+    const sourceLock = JSON.parse(readFileSync(join(workspaceRoot, "package-lock.json"), "utf8"));
+    const productionEntries = await seedPrivateCache(
+      sourceLock,
+      privateCache,
+      npmHostEnvironment,
+    );
+    writeConsumerLock(consumerRoot, tarballRoot, packed, productionEntries);
+    await command(
       "npm",
-      [
-        "pack",
-        "--json",
-        "--workspace",
-        definition.name,
-        "--pack-destination",
-        tarballRoot,
-      ],
+      ["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
       {
-        cwd: workspaceRoot,
-        env: { npm_config_cache: privateCache, npm_config_loglevel: "error" },
+        cwd: consumerRoot,
+        env: { ...npmPrivateEnvironment, npm_config_offline: "true" },
+        timeout: 120_000,
       },
     );
-    if (result.stderr !== "") fail(`npm pack wrote to stderr: ${result.stderr}`);
-    const parsed = JSON.parse(result.stdout);
-    if (!Array.isArray(parsed) || parsed.length !== 1) {
-      fail(`npm pack returned an unexpected payload for ${definition.name}`);
+    const binaryExecutable = await exerciseConsumer(consumerRoot);
+    assertRunActive();
+    const consumerLock = JSON.parse(readFileSync(join(consumerRoot, "package-lock.json"), "utf8"));
+    const licenses = installedProductionLicenses(consumerRoot, consumerLock);
+    const licenseDocument = renderLicenseDocument(licenses);
+    if (process.argv.includes("--write-license-doc")) {
+      writeFileSync(licenseDocumentPath, licenseDocument);
+    } else if (
+      !existsSync(licenseDocumentPath) ||
+      readFileSync(licenseDocumentPath, "utf8") !== licenseDocument
+    ) {
+      fail(
+        "docs/dependency-licenses.md is stale; regenerate it with " +
+        "node tests/package-smoke/pack-smoke.mjs --write-license-doc",
+      );
     }
-    const details = parsed[0];
-    packed.set(definition.name, details);
-    packageSummaries.push(inspectTarball(definition, details, tarballRoot));
-  }
 
-  const sourceLock = JSON.parse(readFileSync(join(workspaceRoot, "package-lock.json"), "utf8"));
-  const productionEntries = seedPrivateCache(sourceLock, privateCache);
-  writeConsumerLock(consumerRoot, tarballRoot, packed, productionEntries);
-  command(
-    "npm",
-    ["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
-    {
-      cwd: consumerRoot,
-      env: { npm_config_cache: privateCache, npm_config_offline: "true" },
-      timeout: 180_000,
-    },
-  );
-  const binaryExecutable = exerciseConsumer(consumerRoot);
-  const consumerLock = JSON.parse(readFileSync(join(consumerRoot, "package-lock.json"), "utf8"));
-  const licenses = installedProductionLicenses(consumerRoot, consumerLock);
-  const licenseDocument = renderLicenseDocument(licenses);
-  if (process.argv.includes("--write-license-doc")) {
-    writeFileSync(licenseDocumentPath, licenseDocument);
-  } else if (
-    !existsSync(licenseDocumentPath) ||
-    readFileSync(licenseDocumentPath, "utf8") !== licenseDocument
-  ) {
-    fail(
-      "docs/dependency-licenses.md is stale; regenerate it with " +
-      "node tests/package-smoke/pack-smoke.mjs --write-license-doc",
-    );
+    assertRunActive();
+    process.stdout.write(`${JSON.stringify({
+      ok: true,
+      binaryExecutable,
+      commands: ["note", "build-artifact", "verify", "update-data"],
+      imports: [
+        "@402v/html-kit-core",
+        "@402v/html-kit-cli",
+        "@402v/theme-402v",
+      ],
+      packages: packageSummaries,
+      productionLicenseCount: licenses.length,
+    })}\n`);
+  } finally {
+    clearTimeout(deadlineTimer);
+    await cleanupExactRoot();
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
+    if (shutdownError !== undefined) throw shutdownError;
   }
+}
 
-  process.stdout.write(`${JSON.stringify({
-    ok: true,
-    binaryExecutable,
-    commands: ["note", "build-artifact", "verify", "update-data"],
-    imports: [
-      "@402v/html-kit-core",
-      "@402v/html-kit-cli",
-      "@402v/theme-402v",
-    ],
-    packages: packageSummaries,
-    productionLicenseCount: licenses.length,
-  })}\n`);
-} finally {
-  if (temporaryRoot !== undefined) {
-    // Windows can preserve an inherited read-only bit on cached content.
-    try {
-      chmodSync(temporaryRoot, 0o700);
-    } catch {
-      // Cleanup below remains authoritative.
-    }
-    rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 3 });
+const isMain = process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+if (isMain) {
+  try {
+    await runPackSmoke();
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+    process.exitCode = error?.exitCode ?? 1;
   }
 }

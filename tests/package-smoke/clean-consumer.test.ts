@@ -9,7 +9,15 @@ describe("packed clean consumer", () => {
   it("installs and exercises only the three produced package tarballs", () => {
     const result = spawnSync(process.execPath, [smokeScript], {
       encoding: "utf8",
-      env: { ...process.env, NODE_PATH: "", NO_COLOR: "1" },
+      env: {
+        ...process.env,
+        NODE_OPTIONS: "--no-warnings",
+        NODE_PATH: "/host/modules-must-not-resolve",
+        NPM_CONFIG_CACHE: "/host/cache-must-not-be-used",
+        NO_COLOR: "1",
+        YARN_GLOBAL_FOLDER: "/host/yarn-must-not-be-used",
+        npm_config_registry: "https://private.invalid",
+      },
       timeout: 180_000,
     });
 
