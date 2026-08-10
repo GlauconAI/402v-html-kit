@@ -114,6 +114,7 @@ function run(
       NODE_PATH: "",
       NO_COLOR: "1",
       npm_config_offline: "true",
+      npm_config_update_notifier: "false",
       ...environment,
     },
     timeout,
@@ -525,6 +526,18 @@ describe.sequential("packed offline examples", () => {
     } finally {
       renameSync(unavailable, cleanThemeDirectory);
     }
+  });
+
+  it("disables npm update notices in the controlled offline environment", () => {
+    const configured = run(
+      "npm",
+      ["config", "get", "update-notifier"],
+      cleanConsumerRoot,
+    );
+    expect(configured.error).toBeUndefined();
+    expect(configured.status).toBe(0);
+    expect(configured.stderr).toBe("");
+    expect(configured.stdout).toBe("false\n");
   });
 
   describe("real Chrome file acceptance", () => {
