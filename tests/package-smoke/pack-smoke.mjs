@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { TextDecoder } from "node:util";
+import { isDeepStrictEqual, TextDecoder } from "node:util";
 import { gunzipSync } from "node:zlib";
 import {
   chmodSync,
@@ -15,10 +15,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+  win32 as windowsPath,
+} from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { parse as parseJavaScript } from "acorn";
+import ts from "typescript";
 
 const workspaceRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -134,21 +143,21 @@ function fail(message) {
   throw new Error(message);
 }
 
-const inheritedEnvironmentAllowlist = new Set([
-  "APPDATA",
-  "ComSpec",
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LOCALAPPDATA",
-  "PATH",
-  "PATHEXT",
-  "SystemRoot",
-  "TEMP",
-  "TMP",
-  "TMPDIR",
-  "USERPROFILE",
-  "WINDIR",
+const inheritedEnvironmentNames = new Map([
+  ["appdata", "APPDATA"],
+  ["comspec", "ComSpec"],
+  ["home", "HOME"],
+  ["lang", "LANG"],
+  ["lc_all", "LC_ALL"],
+  ["localappdata", "LOCALAPPDATA"],
+  ["path", "PATH"],
+  ["pathext", "PATHEXT"],
+  ["systemroot", "SystemRoot"],
+  ["temp", "TEMP"],
+  ["tmp", "TMP"],
+  ["tmpdir", "TMPDIR"],
+  ["userprofile", "USERPROFILE"],
+  ["windir", "WINDIR"],
 ]);
 const explicitEnvironmentAllowlist = new Set([
   "NO_COLOR",
@@ -164,49 +173,20 @@ const explicitEnvironmentAllowlist = new Set([
 export function sanitizedEnvironment(inherited = process.env, overrides = {}) {
   const environment = {};
   for (const [key, value] of Object.entries(inherited)) {
-    if (value !== undefined && inheritedEnvironmentAllowlist.has(key)) {
-      environment[key] = value;
+    const canonical = inheritedEnvironmentNames.get(key.toLowerCase());
+    if (value !== undefined && canonical !== undefined) {
+      environment[canonical] = value;
     }
   }
   for (const [key, value] of Object.entries(overrides)) {
     if (
       value !== undefined &&
-      (inheritedEnvironmentAllowlist.has(key) || explicitEnvironmentAllowlist.has(key))
+      (inheritedEnvironmentNames.has(key.toLowerCase()) || explicitEnvironmentAllowlist.has(key))
     ) {
-      environment[key] = String(value);
+      environment[inheritedEnvironmentNames.get(key.toLowerCase()) ?? key] = String(value);
     }
   }
   return environment;
-}
-
-function staticString(node, constants) {
-  if (node === null || typeof node !== "object") return undefined;
-  if (node.type === "Literal" && typeof node.value === "string") return node.value;
-  if (node.type === "Identifier") return constants.get(node.name);
-  if (node.type === "TemplateLiteral") {
-    let value = "";
-    for (let index = 0; index < node.quasis.length; index += 1) {
-      value += node.quasis[index].value.cooked ?? node.quasis[index].value.raw;
-      if (index < node.expressions.length) {
-        const expression = staticString(node.expressions[index], constants);
-        if (expression === undefined) return undefined;
-        value += expression;
-      }
-    }
-    return value;
-  }
-  if (node.type === "BinaryExpression" && node.operator === "+") {
-    const left = staticString(node.left, constants);
-    const right = staticString(node.right, constants);
-    return left === undefined || right === undefined ? undefined : left + right;
-  }
-  return undefined;
-}
-
-function propertyName(node) {
-  if (node?.type === "Identifier") return node.name;
-  if (node?.type === "Literal" && typeof node.value === "string") return node.value;
-  return undefined;
 }
 
 function sensitiveCredentialName(name) {
@@ -217,17 +197,148 @@ function safeInterpolation(value) {
   return /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/u.test(value);
 }
 
-function walkJavaScript(node, visit) {
-  if (node === null || typeof node !== "object") return;
-  visit(node);
-  for (const [key, value] of Object.entries(node)) {
-    if (key === "start" || key === "end" || key === "loc") continue;
-    if (Array.isArray(value)) {
-      for (const child of value) walkJavaScript(child, visit);
-    } else if (value !== null && typeof value === "object" && typeof value.type === "string") {
-      walkJavaScript(value, visit);
-    }
+const unknownStaticValue = Symbol("unknown-static-value");
+
+function staticValue(node, scope) {
+  if (node === undefined) return undefined;
+  while (
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) ||
+    ts.isSatisfiesExpression(node) ||
+    ts.isNonNullExpression(node)
+  ) {
+    node = node.expression;
   }
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isIdentifier(node)) {
+    const value = scope.get(node.text);
+    return value === unknownStaticValue ? undefined : value;
+  }
+  if (ts.isTemplateExpression(node)) {
+    let value = node.head.text;
+    for (const span of node.templateSpans) {
+      const expression = staticValue(span.expression, scope);
+      if (typeof expression !== "string") return undefined;
+      value += expression + span.literal.text;
+    }
+    return value;
+  }
+  if (
+    ts.isBinaryExpression(node) &&
+    node.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    const left = staticValue(node.left, scope);
+    const right = staticValue(node.right, scope);
+    return typeof left === "string" && typeof right === "string"
+      ? left + right
+      : undefined;
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    const values = node.elements.map((element) => staticValue(element, scope));
+    return values.every((value) => typeof value === "string") ? values : undefined;
+  }
+  if (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    node.expression.name.text === "join" &&
+    node.arguments.length === 1 &&
+    staticValue(node.arguments[0], scope) === ""
+  ) {
+    const values = staticValue(node.expression.expression, scope);
+    return Array.isArray(values) ? values.join("") : undefined;
+  }
+  return undefined;
+}
+
+function typescriptPropertyName(node) {
+  if (node !== undefined && ts.isIdentifier(node)) return node.text;
+  if (node !== undefined && ts.isStringLiteralLike(node)) return node.text;
+  return undefined;
+}
+
+function collectStaticValue(value, values) {
+  if (typeof value === "string") values.push(value);
+  else if (Array.isArray(value)) values.push(...value);
+}
+
+function decodedTypeScriptValues(source, path) {
+  const values = [];
+  const credentials = [];
+  const scriptKind = /\.(?:cjs|js|jsx|mjs)$/iu.test(path)
+    ? ts.ScriptKind.JS
+    : ts.ScriptKind.TS;
+  const sourceFile = ts.createSourceFile(
+    path,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind,
+  );
+  if (sourceFile.parseDiagnostics?.length > 0) {
+    fail(`Published source cannot be parsed statically: ${path}`);
+  }
+
+  const inspectCredential = (name, value) => {
+    if (sensitiveCredentialName(name) && typeof value === "string") {
+      credentials.push(value);
+    }
+  };
+  const visit = (node, scope) => {
+    if (ts.isSourceFile(node) || ts.isBlock(node)) {
+      const childScope = new Map(scope);
+      for (const statement of node.statements) {
+        if (ts.isVariableStatement(statement)) {
+          const isConst = (statement.declarationList.flags & ts.NodeFlags.Const) !== 0;
+          for (const declaration of statement.declarationList.declarations) {
+            const value = staticValue(declaration.initializer, childScope);
+            collectStaticValue(value, values);
+            if (ts.isIdentifier(declaration.name)) {
+              inspectCredential(declaration.name.text, value);
+              childScope.set(
+                declaration.name.text,
+                isConst && value !== undefined ? value : unknownStaticValue,
+              );
+            }
+            if (declaration.initializer !== undefined) {
+              ts.forEachChild(declaration.initializer, (child) => visit(child, childScope));
+            }
+            if (declaration.type !== undefined) visit(declaration.type, childScope);
+          }
+        } else {
+          visit(statement, childScope);
+        }
+      }
+      return;
+    }
+    if (ts.isFunctionLike(node) && node.body !== undefined) {
+      const functionScope = new Map(scope);
+      for (const parameter of node.parameters) {
+        if (ts.isIdentifier(parameter.name)) {
+          functionScope.set(parameter.name.text, unknownStaticValue);
+        }
+      }
+      visit(node.body, functionScope);
+      return;
+    }
+    const value = staticValue(node, scope);
+    collectStaticValue(value, values);
+    if (ts.isPropertyAssignment(node)) {
+      inspectCredential(typescriptPropertyName(node.name), staticValue(node.initializer, scope));
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    ) {
+      const name = ts.isPropertyAccessExpression(node.left)
+        ? node.left.name.text
+        : typescriptPropertyName(node.left);
+      inspectCredential(name, staticValue(node.right, scope));
+    }
+    ts.forEachChild(node, (child) => visit(child, scope));
+  };
+  visit(sourceFile, new Map());
+  return { credentials, values };
 }
 
 function decodedDocumentValues(source, path) {
@@ -248,42 +359,10 @@ function decodedDocumentValues(source, path) {
     visit(document, undefined);
     return { credentials, values };
   }
-  if (!/\.(?:cjs|mjs)$/iu.test(path)) return { credentials, values };
-  const program = parseJavaScript(source, {
-    ecmaVersion: "latest",
-    sourceType: path.endsWith(".cjs") ? "script" : "module",
-  });
-  const constants = new Map();
-  for (const statement of program.body) {
-    if (statement.type !== "VariableDeclaration" || statement.kind !== "const") continue;
-    for (const declaration of statement.declarations) {
-      if (declaration.id.type !== "Identifier") continue;
-      const value = staticString(declaration.init, constants);
-      if (value !== undefined) constants.set(declaration.id.name, value);
-    }
+  if (!/\.(?:cjs|d\.mts|js|jsx|mjs|mts|ts|tsx)$/iu.test(path)) {
+    return { credentials, values };
   }
-  walkJavaScript(program, (node) => {
-    const value = staticString(node, constants);
-    if (value !== undefined) values.push(value);
-    if (node.type === "VariableDeclarator" && sensitiveCredentialName(propertyName(node.id))) {
-      const credential = staticString(node.init, constants);
-      if (credential !== undefined) credentials.push(credential);
-    }
-    if (node.type === "Property" && sensitiveCredentialName(propertyName(node.key))) {
-      const credential = staticString(node.value, constants);
-      if (credential !== undefined) credentials.push(credential);
-    }
-    if (node.type === "AssignmentExpression") {
-      const name = node.left.type === "MemberExpression"
-        ? propertyName(node.left.property)
-        : propertyName(node.left);
-      if (sensitiveCredentialName(name)) {
-        const credential = staticString(node.right, constants);
-        if (credential !== undefined) credentials.push(credential);
-      }
-    }
-  });
-  return { credentials, values };
+  return decodedTypeScriptValues(source, path);
 }
 
 function scanForbiddenValue(packageName, path, value, decoded = false) {
@@ -361,20 +440,106 @@ export function installedBinaryPlan({
   };
 }
 
+export function npmExecutionPlan({
+  comSpec,
+  nodeExecutable = process.execPath,
+  npmExecPath,
+  platform = process.platform,
+}) {
+  if (platform !== "win32") {
+    return { executable: "npm", platform, prefixArgs: [], strategy: "direct" };
+  }
+  if (npmExecPath !== undefined) {
+    if (
+      typeof npmExecPath !== "string" ||
+      !windowsPath.isAbsolute(npmExecPath) ||
+      !/^npm-cli\.(?:js|mjs)$/iu.test(windowsPath.basename(npmExecPath))
+    ) {
+      fail(`Invalid Windows npm CLI entry: ${String(npmExecPath)}`);
+    }
+    return {
+      executable: nodeExecutable,
+      platform,
+      prefixArgs: [npmExecPath],
+      strategy: "cli-entry",
+    };
+  }
+  if (typeof comSpec !== "string" || !windowsPath.isAbsolute(comSpec)) {
+    fail("Windows npm execution requires a validated npm CLI entry or ComSpec");
+  }
+  return {
+    executable: comSpec,
+    platform,
+    prefixArgs: ["/d", "/s", "/c"],
+    strategy: "comspec",
+  };
+}
+
+function windowsCommandQuote(value) {
+  if (/[\0\r\n]/u.test(value)) fail("Unsafe Windows command argument");
+  return `"${value.replaceAll('"', '""').replaceAll("%", "%%")}"`;
+}
+
+function npmCommandArguments(plan, args) {
+  if (plan.strategy !== "comspec") return [...plan.prefixArgs, ...args];
+  return [
+    ...plan.prefixArgs,
+    ["npm.cmd", ...args.map(windowsCommandQuote)].join(" "),
+  ];
+}
+
 export function binaryCommandArguments(plan, args) {
   return [...plan.prefixArgs, ...args];
 }
 
-export function verifyWindowsCmdShim(content) {
+function activeWindowsCmdShimSource(content) {
   let shim;
   try {
     shim = new TextDecoder("utf-8", { fatal: true }).decode(content);
   } catch {
     fail("Installed Windows cmd shim is not valid UTF-8");
   }
-  if (!/@402v[\\/]html-kit-cli[\\/]src[\\/]cli\.mjs/iu.test(shim)) {
+  return shim.split(/\r?\n/u).filter((line) => {
+    const normalized = line.trim().replace(/^@/u, "");
+    return normalized !== "" && !/^(?:rem(?:\s|$)|::)/iu.test(normalized);
+  }).join("\n");
+}
+
+export function verifyWindowsCmdShim(content) {
+  const activeSource = activeWindowsCmdShimSource(content);
+  if (!/%(?:~?dp0)%[\\/]\.\.[\\/]@402v[\\/]html-kit-cli[\\/]src[\\/]cli\.mjs/iu.test(activeSource)) {
     fail("Installed Windows cmd shim does not target the packed CLI entry");
   }
+}
+
+export async function probeWindowsInstalledShim({
+  args = ["--help"],
+  comSpec,
+  run,
+  shimContent,
+  shimPath,
+}) {
+  verifyWindowsCmdShim(shimContent);
+  const result = await run({
+    args: [
+      "/d",
+      "/s",
+      "/c",
+      [windowsCommandQuote(shimPath), ...args.map(windowsCommandQuote)].join(" "),
+    ],
+    executable: comSpec,
+    shimPath,
+  });
+  if (result.status !== 0 || result.stderr !== "") {
+    fail(`Windows cmd shim probe failed: ${result.stderr}`);
+  }
+  const lines = result.stdout.trimEnd().split("\n");
+  if (!result.stdout.endsWith("\n") || lines.length !== 1) {
+    fail("Windows cmd shim probe did not emit exactly one JSON line");
+  }
+  const parsed = JSON.parse(lines[0]);
+  if (parsed?.ok !== true) fail("Windows cmd shim probe returned a failed result");
+  return parsed;
 }
 
 export function hashArchive(archive, algorithm) {
@@ -384,10 +549,17 @@ export function hashArchive(archive, algorithm) {
 export function verifyArchiveIntegrity(archive, integrity) {
   const match = integrity?.match(/^([a-z0-9]+)-(.+)$/iu);
   if (match === null || match === undefined) fail("Invalid archive integrity");
+  if (match[1] !== "sha512") fail("Archive integrity algorithm must be sha512");
   const expected = Buffer.from(match[2], "base64");
   const actual = hashArchive(archive, match[1]);
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     fail("Archive integrity does not match packed bytes");
+  }
+}
+
+export function assertPackedManifestMatches(sourceManifest, packedManifest) {
+  if (!isDeepStrictEqual(sourceManifest, packedManifest)) {
+    fail("Packed manifest differs from the source package.json");
   }
 }
 
@@ -417,7 +589,7 @@ function contained(root, candidate) {
   );
 }
 
-const activeChildren = new Set();
+const activeProcessTrees = new Set();
 let runDeadline = Number.POSITIVE_INFINITY;
 let shutdownError;
 
@@ -435,11 +607,10 @@ function assertRunActive() {
   }
 }
 
-async function signalChildTree(child, signal) {
-  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+async function signalProcessTree(snapshot, signal) {
   if (process.platform === "win32") {
     await new Promise((resolvePromise) => {
-      const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+      const killer = spawn("taskkill", ["/pid", String(snapshot.rootPid), "/t", "/f"], {
         env: sanitizedEnvironment(),
         stdio: "ignore",
       });
@@ -449,21 +620,29 @@ async function signalChildTree(child, signal) {
     return;
   }
   try {
-    process.kill(-child.pid, signal);
+    process.kill(-snapshot.groupId, signal);
   } catch {
-    try {
-      child.kill(signal);
-    } catch {
-      // A concurrent child exit is already the requested state.
-    }
+    // ESRCH means this exact process group is already gone.
   }
 }
 
+async function terminateProcessTrees(records) {
+  const uniqueRecords = [...new Set(records)];
+  if (uniqueRecords.length === 0) return;
+  const snapshots = uniqueRecords.map((record) => ({
+    groupId: record.groupId,
+    rootPid: record.rootPid,
+  }));
+  for (const record of uniqueRecords) record.terminating = true;
+  await Promise.all(snapshots.map((snapshot) => signalProcessTree(snapshot, "SIGTERM")));
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  await Promise.all(snapshots.map((snapshot) => signalProcessTree(snapshot, "SIGKILL")));
+  for (const record of uniqueRecords) activeProcessTrees.delete(record);
+}
+
 async function terminateActiveChildren() {
-  await Promise.all([...activeChildren].map((child) => signalChildTree(child, "SIGTERM")));
-  if (activeChildren.size === 0) return;
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
-  await Promise.all([...activeChildren].map((child) => signalChildTree(child, "SIGKILL")));
+  const records = [...activeProcessTrees];
+  await terminateProcessTrees(records);
 }
 
 async function command(executable, args, options = {}) {
@@ -481,17 +660,30 @@ async function command(executable, args, options = {}) {
       }),
       stdio: ["ignore", "pipe", "pipe"],
     });
-    activeChildren.add(child);
+    const record = {
+      child,
+      groupId: child.pid,
+      rootPid: child.pid,
+      terminating: false,
+      terminationPromise: undefined,
+    };
+    activeProcessTrees.add(record);
     options.onSpawn?.(child);
     const stdout = [];
     const stderr = [];
     let outputBytes = 0;
     let timedOut = false;
+    let outputLimited = false;
+    const terminateRecord = () => {
+      record.terminationPromise ??= terminateProcessTrees([record]);
+      return record.terminationPromise;
+    };
     const capture = (chunks) => (chunk) => {
+      if (outputLimited) return;
       outputBytes += chunk.length;
       if (outputBytes > 4 * 1024 * 1024) {
-        timedOut = true;
-        void signalChildTree(child, "SIGTERM");
+        outputLimited = true;
+        void terminateRecord();
         return;
       }
       chunks.push(chunk);
@@ -500,18 +692,29 @@ async function command(executable, args, options = {}) {
     child.stderr.on("data", capture(stderr));
     const timer = setTimeout(() => {
       timedOut = true;
-      void signalChildTree(child, "SIGTERM");
-      setTimeout(() => void signalChildTree(child, "SIGKILL"), 200).unref();
+      void terminateRecord();
     }, timeout);
     timer.unref();
     child.once("error", (error) => {
       clearTimeout(timer);
-      activeChildren.delete(child);
+      activeProcessTrees.delete(record);
       rejectPromise(new Error(`${executable} could not run: ${error.message}`));
     });
-    child.once("close", (status, signal) => {
+    child.once("close", async (status, signal) => {
       clearTimeout(timer);
-      activeChildren.delete(child);
+      if (!record.terminating) {
+        let processTreeSurvives = false;
+        if (process.platform !== "win32") {
+          try {
+            process.kill(-record.groupId, 0);
+            processTreeSurvives = true;
+          } catch {
+            // This exact process group has exited completely.
+          }
+        }
+        if (!processTreeSurvives) activeProcessTrees.delete(record);
+      }
+      if (record.terminationPromise !== undefined) await record.terminationPromise;
       const result = {
         status,
         signal,
@@ -520,8 +723,11 @@ async function command(executable, args, options = {}) {
       };
       if (shutdownError !== undefined) {
         rejectPromise(shutdownError);
-      } else if (timedOut) {
-        rejectPromise(new SmokeExitError(`${executable} exceeded its timeout`, 124));
+      } else if (timedOut || outputLimited) {
+        rejectPromise(new SmokeExitError(
+          `${executable} exceeded its ${outputLimited ? "output limit" : "timeout"}`,
+          124,
+        ));
       } else if (status !== 0) {
         rejectPromise(new Error(
           `${executable} ${args.join(" ")} exited ${status ?? signal}\n` +
@@ -547,6 +753,10 @@ async function jsonCommand(executable, args, cwd, plan) {
   const parsed = JSON.parse(lines[0]);
   if (parsed?.ok !== true) fail(`${executable} returned a failed result`);
   return parsed;
+}
+
+async function runNpm(plan, args, options = {}) {
+  return await command(plan.executable, npmCommandArguments(plan, args), options);
 }
 
 function readTarEntries(tarballPath) {
@@ -709,9 +919,7 @@ function inspectTarball(definition, details, tarballRoot) {
   const packedManifest = JSON.parse(
     new TextDecoder("utf-8", { fatal: true }).decode(packedManifestEntry.content),
   );
-  if (packedManifest.name !== definition.name || packedManifest.version !== manifest.version) {
-    fail(`Packed manifest identity mismatch for ${definition.name}`);
-  }
+  assertPackedManifestMatches(manifest, packedManifest);
   if (
     definition.name === "@402v/theme-402v" &&
     (reviewedBrandFiles.size !== reviewedThemeBrandFiles.size ||
@@ -745,9 +953,9 @@ function cacheContentPath(cacheRoot, integrity) {
   );
 }
 
-async function seedPrivateCache(sourceLock, privateCache, npmHostEnvironment) {
+async function seedPrivateCache(sourceLock, privateCache, npmHostEnvironment, npmPlan) {
   const hostCache = (
-    await command("npm", ["config", "get", "cache"], { env: npmHostEnvironment })
+    await runNpm(npmPlan, ["config", "get", "cache"], { env: npmHostEnvironment })
   ).stdout.trim();
   const productionEntries = {};
   for (const [path, entry] of Object.entries(sourceLock.packages)) {
@@ -925,6 +1133,19 @@ async function exerciseConsumer(consumerRoot) {
     plan,
   );
   await jsonCommand(plan.executable, ["verify", "artifact.html", "--required-block", "registry"], fixtureRoot, plan);
+  if (process.platform === "win32") {
+    const comSpec = sanitizedEnvironment().ComSpec;
+    if (typeof comSpec !== "string" || !windowsPath.isAbsolute(comSpec)) {
+      fail("Windows cmd shim probe requires an absolute ComSpec");
+    }
+    await probeWindowsInstalledShim({
+      args: ["verify", "artifact.html", "--required-block", "registry"],
+      comSpec,
+      run: async ({ args, executable }) => await command(executable, args, { cwd: fixtureRoot }),
+      shimContent: readFileSync(plan.shimPath),
+      shimPath: plan.shimPath,
+    });
+  }
   await jsonCommand(
     plan.executable,
     [
@@ -1063,20 +1284,45 @@ async function runPackSmoke() {
 
     if (process.argv.includes("--cleanup-probe")) {
       const readyPath = process.env.PACK_SMOKE_PROBE_READY;
+      const termMarker = process.env.PACK_SMOKE_PROBE_TERM_MARKER;
+      const probeMode = process.env.PACK_SMOKE_PROBE_MODE;
       if (typeof readyPath !== "string" || !isAbsolute(readyPath)) {
         fail("Cleanup probe requires an absolute PACK_SMOKE_PROBE_READY");
+      }
+      if (typeof termMarker !== "string" || !isAbsolute(termMarker)) {
+        fail("Cleanup probe requires an absolute PACK_SMOKE_PROBE_TERM_MARKER");
+      }
+      if (!["leader-exit", "output-limit", "signal", "timeout"].includes(probeMode)) {
+        fail("Cleanup probe requires a valid PACK_SMOKE_PROBE_MODE");
       }
       await command(
         process.execPath,
         [
           "-e",
           `const { spawn } = require("node:child_process");
-const { writeFileSync } = require("node:fs");
-const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-writeFileSync(process.argv[1], JSON.stringify({ childPid: process.pid, grandchildPid: grandchild.pid, root: process.argv[2] }));
+const grandchildSource = \`const { writeFileSync } = require("node:fs");
+process.on("SIGTERM", () => writeFileSync(process.argv[1], "TERM"));
+writeFileSync(process.argv[2], JSON.stringify({ childPid: Number(process.argv[3]), grandchildPid: process.pid, root: process.argv[4] }));
+if (process.send) process.send("ready");
+setInterval(() => {}, 1000);\`;
+const grandchild = spawn(process.execPath, ["-e", grandchildSource, process.argv[3], process.argv[1], String(process.pid), process.argv[2]], {
+  stdio: ["ignore", "ignore", "ignore", "ipc"],
+});
+grandchild.once("message", () => {
+  grandchild.disconnect();
+  if (process.argv[4] === "leader-exit") {
+    grandchild.unref();
+    process.exit(0);
+  }
+  if (process.argv[4] === "output-limit") {
+    process.stdout.write("x".repeat(5 * 1024 * 1024));
+  }
+});
 setInterval(() => {}, 1000);`,
           readyPath,
           temporaryRoot,
+          termMarker,
+          probeMode,
         ],
         {
           cwd: temporaryRoot,
@@ -1110,12 +1356,21 @@ setInterval(() => {}, 1000);`,
       npm_config_ignore_scripts: "true",
       npm_config_prefix: privatePrefix,
     };
+    const canonicalEnvironment = sanitizedEnvironment();
+    const npmExecPath = process.env.npm_execpath;
+    if (process.platform === "win32" && npmExecPath !== undefined && !existsSync(npmExecPath)) {
+      fail(`Windows npm CLI entry does not exist: ${npmExecPath}`);
+    }
+    const npmPlan = npmExecutionPlan({
+      comSpec: canonicalEnvironment.ComSpec,
+      npmExecPath,
+    });
 
     const packed = new Map();
     const packageSummaries = [];
     for (const definition of packageDefinitions) {
-      const result = await command(
-        "npm",
+      const result = await runNpm(
+        npmPlan,
         [
           "pack",
           "--json",
@@ -1142,10 +1397,11 @@ setInterval(() => {}, 1000);`,
       sourceLock,
       privateCache,
       npmHostEnvironment,
+      npmPlan,
     );
     writeConsumerLock(consumerRoot, tarballRoot, packed, productionEntries);
-    await command(
-      "npm",
+    await runNpm(
+      npmPlan,
       ["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
       {
         cwd: consumerRoot,

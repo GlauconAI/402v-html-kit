@@ -43,21 +43,38 @@ function processExists(pid: number) {
   }
 }
 
-async function cleanupProbe(mode: "signal" | "timeout", signal: NodeJS.Signals = "SIGTERM") {
+async function cleanupProbe(
+  mode: "leader-exit" | "output-limit" | "signal" | "timeout",
+  signal: NodeJS.Signals = "SIGTERM",
+) {
   const testRoot = mkdtempSync(join(tmpdir(), "402v-cleanup-test-"));
   temporaryRoots.push(testRoot);
   const probeParent = join(testRoot, "probe-roots");
   const readyPath = join(testRoot, "ready.json");
+  const termMarker = join(testRoot, "grandchild-term.txt");
   mkdirSync(probeParent);
+  const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: process.platform !== "win32",
+    stdio: "ignore",
+  });
+  const unrelatedExit = new Promise<void>((resolve) => unrelated.once("exit", () => resolve()));
   const child = spawn(process.execPath, [smokeScript, "--cleanup-probe"], {
     env: {
       ...process.env,
+      PACK_SMOKE_PROBE_MODE: mode,
       PACK_SMOKE_PROBE_PARENT: probeParent,
       PACK_SMOKE_PROBE_READY: readyPath,
-      PACK_SMOKE_GLOBAL_TIMEOUT_MS: "350",
+      PACK_SMOKE_PROBE_TERM_MARKER: termMarker,
+      PACK_SMOKE_GLOBAL_TIMEOUT_MS: mode === "output-limit" ? "5000" : "1500",
     },
     stdio: "ignore",
   });
+  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    },
+  );
   try {
     await waitUntil(() => existsSync(readyPath));
     const ready = JSON.parse(readFileSync(readyPath, "utf8")) as {
@@ -67,15 +84,10 @@ async function cleanupProbe(mode: "signal" | "timeout", signal: NodeJS.Signals =
     };
     expect(ready.childPid).toBeGreaterThan(0);
     expect(ready.grandchildPid).toBeGreaterThan(0);
-    const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolve, reject) => {
-        child.once("error", reject);
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      },
-    );
     if (mode === "signal") child.kill(signal);
     const result = await exit;
     expect(
+      (mode === "leader-exit" && result.code === 1) ||
       result.code === 124 ||
       result.code === 130 ||
       result.code === 143 ||
@@ -84,10 +96,18 @@ async function cleanupProbe(mode: "signal" | "timeout", signal: NodeJS.Signals =
     ).toBe(true);
     await waitUntil(() => !processExists(ready.childPid));
     await waitUntil(() => !processExists(ready.grandchildPid));
+    if (mode === "leader-exit" || mode === "output-limit") {
+      if (process.platform !== "win32") {
+        expect(readFileSync(termMarker, "utf8")).toBe("TERM");
+      }
+    }
+    expect(processExists(unrelated.pid!)).toBe(true);
     expect(existsSync(ready.root)).toBe(false);
     expect(readdirSync(probeParent)).toEqual([]);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    if (unrelated.exitCode === null && unrelated.signalCode === null) unrelated.kill("SIGKILL");
+    await unrelatedExit;
   }
 }
 
@@ -104,7 +124,10 @@ describe("package boundary hardening", () => {
       "hashArchive",
       "inspectPublishedText",
       "installedBinaryPlan",
+      "npmExecutionPlan",
+      "probeWindowsInstalledShim",
       "sanitizedEnvironment",
+      "assertPackedManifestMatches",
       "validatePackFilename",
       "verifyArchiveIntegrity",
       "verifyWindowsCmdShim",
@@ -136,6 +159,37 @@ describe("package boundary hardening", () => {
 
   it("decodes JSON string escapes without executing package code", () => {
     expect(() => inspect('{"url":"402v\\u002ecom"}', { path: "package.json" })).toThrow();
+  });
+
+  it.each([
+    [
+      "declaration literal",
+      "src/probe.d.mts",
+      'export declare const endpoint: "402v\\u002ecom";',
+    ],
+    [
+      "typed module literal",
+      "src/probe.mts",
+      'const endpoint: string = ["Sup", "abase"].join("");',
+    ],
+    [
+      "typed source nested constants",
+      "src/probe.ts",
+      'function probe() { const left: string = "Ver"; { const endpoint = left + "cel"; } }',
+    ],
+    [
+      "nested JavaScript array join",
+      "src/probe.mjs",
+      'function probe() { const left = "402"; { const endpoint = [left, "v", ".com"].join(""); } }',
+    ],
+  ])("statically rejects %s in %s", (_label, path, source) => {
+    expect(() => inspect(source, { path })).toThrow();
+  });
+
+  it("respects lexical shadowing while folding nested constants", () => {
+    expect(() => inspect(
+      'const left = "402"; function probe() { const left = "safe"; const endpoint = left + "v.com"; }',
+    )).not.toThrow();
   });
 
   it("parses package JavaScript without evaluating it", () => {
@@ -204,6 +258,72 @@ describe("package boundary hardening", () => {
     ))).toThrow();
   });
 
+  it("canonicalizes mixed-case Windows process environment keys", () => {
+    expect(smoke.sanitizedEnvironment({
+      Path: "C:\\Windows\\System32",
+      pathext: ".COM;.EXE;.CMD",
+      COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+      SYSTEMROOT: "C:\\Windows",
+    })).toEqual({
+      ComSpec: "C:\\Windows\\System32\\cmd.exe",
+      PATH: "C:\\Windows\\System32",
+      PATHEXT: ".COM;.EXE;.CMD",
+      SystemRoot: "C:\\Windows",
+    });
+  });
+
+  it("plans Windows npm through a validated CLI or ComSpec fallback", () => {
+    expect(smoke.npmExecutionPlan({
+      comSpec: "C:\\Windows\\System32\\cmd.exe",
+      nodeExecutable: "C:\\Program Files\\nodejs\\node.exe",
+      npmExecPath: "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+      platform: "win32",
+    })).toEqual(expect.objectContaining({
+      executable: "C:\\Program Files\\nodejs\\node.exe",
+      prefixArgs: ["C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js"],
+    }));
+    expect(smoke.npmExecutionPlan({
+      comSpec: "C:\\Windows\\System32\\cmd.exe",
+      platform: "win32",
+    })).toEqual(expect.objectContaining({
+      executable: "C:\\Windows\\System32\\cmd.exe",
+      prefixArgs: ["/d", "/s", "/c"],
+    }));
+    expect(() => smoke.npmExecutionPlan({
+      npmExecPath: "C:\\host\\not-npm.js",
+      platform: "win32",
+    })).toThrow();
+  });
+
+  it("requires an active packed target and successful JSON from fake ComSpec", async () => {
+    const validShim = Buffer.from(
+      '@echo off\r\n"%dp0%\\..\\@402v\\html-kit-cli\\src\\cli.mjs" %*\r\n',
+    );
+    const success = async () => ({ status: 0, stderr: "", stdout: '{"ok":true}\n' });
+    await expect(smoke.probeWindowsInstalledShim({
+      run: success,
+      shimContent: validShim,
+      shimPath: "C:\\consumer\\node_modules\\.bin\\402v-html-kit.cmd",
+    })).resolves.toMatchObject({ ok: true });
+    await expect(smoke.probeWindowsInstalledShim({
+      run: success,
+      shimContent: Buffer.from(
+        'rem "%dp0%\\..\\@402v\\html-kit-cli\\src\\cli.mjs"\r\n@exit /b 0\r\n',
+      ),
+      shimPath: "C:\\consumer\\node_modules\\.bin\\402v-html-kit.cmd",
+    })).rejects.toThrow();
+    await expect(smoke.probeWindowsInstalledShim({
+      run: async () => ({ status: 1, stderr: "failed", stdout: "" }),
+      shimContent: validShim,
+      shimPath: "C:\\consumer\\node_modules\\.bin\\402v-html-kit.cmd",
+    })).rejects.toThrow();
+    await expect(smoke.probeWindowsInstalledShim({
+      run: success,
+      shimContent: Buffer.from('@echo off\r\n"C:\\host\\@402v\\html-kit-cli\\src\\cli.mjs" %*\r\n'),
+      shimPath: "C:\\consumer\\node_modules\\.bin\\402v-html-kit.cmd",
+    })).rejects.toThrow();
+  });
+
   it("removes resolution-affecting inherited environment variables", () => {
     expect(smoke.sanitizedEnvironment({
       HOME: "/safe/home",
@@ -255,17 +375,49 @@ describe("package boundary hardening", () => {
     })).toThrow();
     expect(() => smoke.verifyArchiveIntegrity(archive, integrity)).not.toThrow();
     expect(() => smoke.verifyArchiveIntegrity(Buffer.from("altered"), integrity)).toThrow();
+    const sha256 = `sha256-${smoke.hashArchive(archive, "sha256").toString("base64")}`;
+    expect(() => smoke.verifyArchiveIntegrity(archive, sha256)).toThrow(/sha512/);
+  });
+
+  it("compares all packed manifest publication fields to source", () => {
+    const source = {
+      name: "@402v/example",
+      version: "0.1.0",
+      type: "module",
+      exports: { ".": "./src/index.mjs" },
+      files: ["src"],
+      license: "MIT",
+      dependencies: { acorn: "^8.0.0" },
+      engines: { node: ">=22" },
+    };
+    expect(() => smoke.assertPackedManifestMatches(source, structuredClone(source))).not.toThrow();
+    expect(() => smoke.assertPackedManifestMatches(source, {
+      ...structuredClone(source),
+      dependencies: { acorn: "latest" },
+    })).toThrow();
+    expect(() => smoke.assertPackedManifestMatches(source, {
+      ...structuredClone(source),
+      private: true,
+    })).toThrow();
   });
 
   it("cleans the exact temporary root and child after a global timeout", async () => {
     await cleanupProbe("timeout");
-  }, 15_000);
+  }, 20_000);
 
   it("cleans the exact temporary root and child after SIGTERM", async () => {
     await cleanupProbe("signal", "SIGTERM");
-  }, 15_000);
+  }, 20_000);
 
   it("cleans the exact temporary root and child after SIGINT", async () => {
     await cleanupProbe("signal", "SIGINT");
-  }, 15_000);
+  }, 20_000);
+
+  it("kills the original group after its leader exits and grandchild resists TERM", async () => {
+    await cleanupProbe("leader-exit");
+  }, 20_000);
+
+  it("kills an output-limit process tree whose grandchild resists TERM", async () => {
+    await cleanupProbe("output-limit");
+  }, 20_000);
 });

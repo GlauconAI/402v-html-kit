@@ -8,7 +8,16 @@ import { inspectPublishedText } from "./pack-smoke.mjs";
 
 const workspaceRoot = fileURLToPath(new URL("../../", import.meta.url));
 const packageRoot = join(workspaceRoot, "packages");
-const publicFileExtensions = new Set([".cjs", ".json", ".mjs", ".mts"]);
+const publicFileExtensions = new Set([
+  ".cjs",
+  ".js",
+  ".json",
+  ".jsx",
+  ".mjs",
+  ".mts",
+  ".ts",
+  ".tsx",
+]);
 const reviewedThemeBrandFiles = new Set([
   "packages/theme-402v/src/interactive-shell.mjs",
   "packages/theme-402v/src/note-shell.mjs",
