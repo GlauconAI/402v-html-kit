@@ -264,12 +264,10 @@ function validateRendererResult(value) {
     prototype = Object.getPrototypeOf(value);
     descriptors = Object.getOwnPropertyDescriptors(value);
     keys = Reflect.ownKeys(value);
-  } catch (cause) {
+  } catch {
     fail(
       "INVALID_RENDERER_RESULT",
       "Renderer result cannot be inspected safely",
-      undefined,
-      { cause },
     );
   }
   if (array) {
@@ -351,13 +349,10 @@ export async function renderInteractiveModel(manifest, options = undefined) {
   let namespace;
   try {
     namespace = await internals.importRenderer();
-  } catch (cause) {
-    if (cause instanceof ArtifactBuildError) throw cause;
+  } catch {
     fail(
       "INVALID_RENDERER_RESULT",
       "Unable to import renderer",
-      undefined,
-      { cause },
     );
   }
   if (typeof namespace.renderArtifact !== "function") {
@@ -374,12 +369,10 @@ export async function renderInteractiveModel(manifest, options = undefined) {
       svg: rendererSvg(svg),
       metadata: deepFreeze({ ...loadedManifest.metadata }),
     });
-  } catch (cause) {
+  } catch {
     fail(
       "INVALID_RENDERER_RESULT",
       "renderArtifact execution failed",
-      undefined,
-      { cause },
     );
   }
 

@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspect } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -360,6 +361,54 @@ describe("themed interactive artifact build", () => {
       }
       expect(readdirSync(project.root).filter((name) => name.includes(".tmp-"))).toEqual([]);
     }
+  });
+
+  it.each([
+    [
+      "import failure",
+      'throw new Error("IMPORT_RENDER_SECRET /private/renderer-path"); export function renderArtifact() { return {}; }',
+      "IMPORT_RENDER_SECRET",
+    ],
+    [
+      "synchronous throw",
+      'export function renderArtifact() { throw new Error("SYNC_RENDER_SECRET /private/renderer-path"); }',
+      "SYNC_RENDER_SECRET",
+    ],
+    [
+      "async rejection",
+      'export async function renderArtifact() { await Promise.resolve(); throw new Error("ASYNC_RENDER_SECRET /private/renderer-path"); }',
+      "ASYNC_RENDER_SECRET",
+    ],
+    [
+      "hostile result inspection",
+      'export function renderArtifact() { return new Proxy({}, { ownKeys() { throw new Error("RESULT_RENDER_SECRET /private/renderer-path"); } }); }',
+      "RESULT_RENDER_SECRET",
+    ],
+  ])("redacts renderer %s across every public error surface", async (_label, renderer, sentinel) => {
+    const project = writeProject({ renderer });
+    const error = await expectRejection(
+      () => buildInteractiveArtifact({
+        manifestPath: project.manifestPath,
+        outputPath: project.outputPath,
+        theme: theme(),
+        verifyDeterminism: false,
+      }),
+      "INVALID_RENDERER_RESULT",
+    );
+
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+    const surfaces = [
+      error.message,
+      JSON.stringify(error.details),
+      JSON.stringify(error.toJSON()),
+      JSON.stringify(error),
+      inspect(error, { depth: 8 }),
+      inspect((error as Error & { cause?: unknown }).cause, { depth: 8 }),
+    ].join("\n");
+    expect(surfaces).not.toContain(sentinel);
+    expect(surfaces).not.toContain("/private/renderer-path");
+    expect(surfaces).not.toContain(project.root);
+    expect(existsSync(project.outputPath)).toBe(false);
   });
 
   it("rejects malformed options, manifest objects, entries, aliases, and force misuse", async () => {
