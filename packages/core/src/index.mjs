@@ -9,5 +9,6 @@ export {
 export { ARTIFACT_RESOURCE_LIMITS } from "./resource-limits.mjs";
 export { detectArtifactContract } from "./contracts.mjs";
 export { assembleArtifactV2 } from "./document-v2.mjs";
+export { buildNote } from "./build-note.mjs";
 export { renderThemeV1 } from "./theme-contract.mjs";
 export { verifyArtifactHtml } from "./verify.mjs";

@@ -31,6 +31,30 @@ export interface AssembleArtifactV2Input {
 
 export declare function assembleArtifactV2(input: AssembleArtifactV2Input): string;
 
+export interface BuildNoteOptions {
+  inputPath: string;
+  outputPath: string;
+  force?: boolean;
+  theme: import("./theme-contract.mjs").ArtifactThemeV1;
+}
+
+export interface NoteBuildResult {
+  ok: true;
+  contractVersion: 2;
+  mode: "note";
+  output: string;
+  title: string;
+  bytes: number;
+  sourceHash: string;
+  outputHash: string;
+  dataBlockIds: string[];
+  theme: Readonly<ArtifactV2ThemeIdentity>;
+}
+
+export declare function buildNote(
+  options: BuildNoteOptions,
+): Promise<NoteBuildResult>;
+
 export type {
   ArtifactContract,
   ArtifactVerificationResult,
