@@ -2,6 +2,7 @@ import {
   closeSync,
   constants,
   fstatSync,
+  lstatSync,
   openSync,
   readFileSync,
   realpathSync,
@@ -15,11 +16,16 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ArtifactBuildError } from "@402v/html-kit-core";
+import { parse } from "acorn";
 
 const OFFICIAL_THEME = "@402v/theme-402v";
 const MAX_THEME_SPECIFIER_BYTES = 256;
 const MAX_BASE_DIRECTORY_BYTES = 4_096;
 const MAX_LOCAL_THEME_BYTES = 1024 * 1024;
+const MAX_LOCAL_GRAPH_BYTES = 4 * 1024 * 1024;
+const MAX_LOCAL_GRAPH_FILES = 64;
+const MAX_LOCAL_GRAPH_DEPTH = 32;
+const MAX_LOCAL_AST_NODES = 100_000;
 const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 
 /** @param {{ flag?: string, manifest?: string }} selection */
@@ -102,13 +108,14 @@ function resolveThemeModule(specifier, base) {
   let local = false;
   if (localSpecifier(specifier)) {
     local = true;
+    const requested = resolve(base.canonical, specifier);
     let canonical;
     try {
-      canonical = realpathSync(resolve(base.canonical, specifier));
+      canonical = realpathSync(requested);
     } catch {
       fail("Local theme module could not be resolved");
     }
-    if (!contained(base.canonical, canonical)) {
+    if (canonical !== requested || !contained(base.canonical, canonical)) {
       fail("Local theme module must remain inside the selected directory");
     }
     path = canonical;
@@ -162,21 +169,38 @@ function resolveThemeModule(specifier, base) {
   });
 }
 
-function snapshotLocalModule(module) {
+function pinnedLocalFile(path, base, budget) {
+  let canonical;
+  let pathStats;
+  try {
+    canonical = realpathSync(path);
+    pathStats = lstatSync(path, { bigint: true });
+  } catch {
+    fail("Local theme dependency could not be resolved safely");
+  }
+  if (
+    canonical !== path ||
+    !contained(base.canonical, canonical) ||
+    pathStats.isSymbolicLink() ||
+    !pathStats.isFile()
+  ) {
+    fail("Local theme dependencies must be canonical contained files");
+  }
+
   let descriptor;
   try {
     descriptor = openSync(
-      module.path,
+      path,
       constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
     );
     const before = fstatSync(descriptor, { bigint: true });
     if (
       !before.isFile() ||
-      before.dev !== module.identity.dev ||
-      before.ino !== module.identity.ino ||
+      before.dev !== pathStats.dev ||
+      before.ino !== pathStats.ino ||
       before.size > BigInt(MAX_LOCAL_THEME_BYTES)
     ) {
-      fail("Local theme module changed before it could be read safely");
+      fail("Local theme dependency changed before it could be read safely");
     }
     const bytes = readFileSync(descriptor);
     const after = fstatSync(descriptor, { bigint: true });
@@ -187,18 +211,33 @@ function snapshotLocalModule(module) {
       after.mtimeNs !== before.mtimeNs ||
       after.ctimeNs !== before.ctimeNs
     ) {
-      fail("Local theme module changed while it was being read");
+      fail("Local theme dependency changed while it was being read");
+    }
+    budget.bytes += bytes.byteLength;
+    if (budget.bytes > MAX_LOCAL_GRAPH_BYTES) {
+      fail("Local theme dependency graph exceeds its aggregate byte limit");
     }
     let source;
     try {
       source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
-      fail("Local theme module must contain strict UTF-8");
+      fail("Local theme dependencies must contain strict UTF-8");
     }
-    return `${source}\n//# sourceURL=${pathToFileURL(module.path).href}\n`;
+    return Object.freeze({
+      path,
+      label: relative(base.canonical, path),
+      source,
+      identity: Object.freeze({
+        dev: before.dev,
+        ino: before.ino,
+        size: before.size,
+        mtimeNs: before.mtimeNs,
+        ctimeNs: before.ctimeNs,
+      }),
+    });
   } catch (error) {
     if (error instanceof ArtifactBuildError) throw error;
-    fail("Local theme module could not be read safely");
+    fail("Local theme dependency could not be read safely");
   } finally {
     if (descriptor !== undefined) {
       try {
@@ -208,42 +247,383 @@ function snapshotLocalModule(module) {
   }
 }
 
-function stageLocalSnapshot(module, source) {
-  const directory = dirname(module.path);
-  const path = join(
-    directory,
-    `.402v-theme-${randomBytes(24).toString("hex")}.mjs`,
-  );
-  let descriptor;
+function importReferences(source) {
+  let program;
   try {
-    descriptor = openSync(
-      path,
-      constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_WRONLY |
-        (constants.O_NOFOLLOW ?? 0),
-      0o400,
-    );
-    writeFileSync(descriptor, source, "utf8");
-    const stats = fstatSync(descriptor, { bigint: true });
-    if (!stats.isFile() || stats.size !== BigInt(Buffer.byteLength(source))) {
-      fail("Local theme snapshot could not be installed safely");
-    }
-    closeSync(descriptor);
-    descriptor = undefined;
-    return path;
-  } catch (error) {
-    if (descriptor !== undefined) {
-      try {
-        closeSync(descriptor);
-      } catch {}
-    }
-    try {
-      unlinkSync(path);
-    } catch {}
-    if (error instanceof ArtifactBuildError) throw error;
-    fail("Local theme snapshot could not be installed safely");
+    program = parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "module",
+    });
+  } catch {
+    fail("Local theme dependency must be valid ESM");
   }
+
+  const references = [];
+  const pending = [program];
+  let nodes = 0;
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node === null || typeof node !== "object") continue;
+    nodes += 1;
+    if (nodes > MAX_LOCAL_AST_NODES) {
+      fail("Local theme dependency syntax exceeds its node limit");
+    }
+    let sourceNode;
+    if (
+      node.type === "ImportDeclaration" ||
+      node.type === "ExportNamedDeclaration" ||
+      node.type === "ExportAllDeclaration"
+    ) {
+      sourceNode = node.source;
+    } else if (node.type === "ImportExpression") {
+      sourceNode = node.source;
+      if (
+        sourceNode?.type !== "Literal" ||
+        typeof sourceNode.value !== "string"
+      ) {
+        fail("Local theme dynamic imports must use string literals");
+      }
+    }
+    if (sourceNode !== null && sourceNode !== undefined) {
+      if (
+        sourceNode.type !== "Literal" ||
+        typeof sourceNode.value !== "string"
+      ) {
+        fail("Local theme imports must use string literals");
+      }
+      references.push({
+        end: sourceNode.end,
+        specifier: sourceNode.value,
+        start: sourceNode.start,
+      });
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) pending.push(...value);
+      else if (value !== null && typeof value === "object") pending.push(value);
+    }
+  }
+  return references;
+}
+
+function localDependencyPath(specifier, parentPath, base) {
+  if (
+    typeof specifier !== "string" ||
+    specifier.length === 0 ||
+    specifier.includes("\0") ||
+    Buffer.byteLength(specifier, "utf8") > MAX_THEME_SPECIFIER_BYTES
+  ) {
+    fail("Local theme import specifiers must be bounded strings");
+  }
+  if (specifier.startsWith("//")) {
+    fail("Local theme dependencies cannot use URL imports");
+  }
+  if (URL_SCHEME.test(specifier)) {
+    if (specifier.startsWith("node:")) return undefined;
+    fail("Local theme dependencies cannot use URL imports");
+  }
+  if (isAbsolute(specifier)) {
+    fail("Local theme dependencies must use relative paths");
+  }
+  if (!localSpecifier(specifier)) return undefined;
+  let url;
+  let requested;
+  try {
+    url = new URL(specifier, pathToFileURL(parentPath));
+    if (url.protocol !== "file:" || url.search !== "" || url.hash !== "") {
+      fail("Local theme dependencies must use plain relative paths");
+    }
+    requested = fileURLToPath(url);
+  } catch (error) {
+    if (error instanceof ArtifactBuildError) throw error;
+    fail("Local theme dependency path is invalid");
+  }
+  if (!contained(base.canonical, requested)) {
+    fail("Local theme dependency escaped the selected directory");
+  }
+  return requested;
+}
+
+function rewriteSource(source, rewrites, originalPath, outputBudget, limits) {
+  const suffix = `\n//# sourceURL=${pathToFileURL(originalPath).href}\n`;
+  let projectedBytes = Buffer.byteLength(source) + Buffer.byteLength(suffix);
+  const prepared = [];
+  let cursor = 0;
+  for (const rewrite of [...rewrites].sort((left, right) => left.start - right.start)) {
+    if (
+      !Number.isSafeInteger(rewrite.start) ||
+      !Number.isSafeInteger(rewrite.end) ||
+      rewrite.start < cursor ||
+      rewrite.end < rewrite.start ||
+      rewrite.end > source.length
+    ) {
+      fail("Local theme import rewrite ranges are invalid");
+    }
+    const replacement = JSON.stringify(rewrite.value);
+    projectedBytes +=
+      Buffer.byteLength(replacement) -
+      Buffer.byteLength(source.slice(rewrite.start, rewrite.end));
+    if (
+      projectedBytes > limits.fileBytes ||
+      outputBudget.bytes + projectedBytes > limits.graphBytes
+    ) {
+      fail("Local theme rewritten snapshot exceeds its byte limit");
+    }
+    prepared.push({ ...rewrite, replacement });
+    cursor = rewrite.end;
+  }
+  if (
+    projectedBytes > limits.fileBytes ||
+    outputBudget.bytes + projectedBytes > limits.graphBytes
+  ) {
+    fail("Local theme rewritten snapshot exceeds its byte limit");
+  }
+  outputBudget.bytes += projectedBytes;
+
+  const chunks = [];
+  cursor = 0;
+  for (const rewrite of prepared) {
+    chunks.push(source.slice(cursor, rewrite.start), rewrite.replacement);
+    cursor = rewrite.end;
+  }
+  chunks.push(source.slice(cursor), suffix);
+  return chunks.join("");
+}
+
+function buildLocalGraph(entryPath, base, limits) {
+  const budget = { bytes: 0 };
+  const outputBudget = { bytes: 0 };
+  const records = new Map();
+  const snapshotNames = new Set();
+
+  function uniqueSnapshotName() {
+    for (;;) {
+      const name = `.402v-theme-snapshot-${randomBytes(24).toString("hex")}.mjs`;
+      if (!snapshotNames.has(name)) {
+        snapshotNames.add(name);
+        return name;
+      }
+    }
+  }
+
+  function visit(path, depth) {
+    if (records.has(path)) return records.get(path);
+    if (depth > MAX_LOCAL_GRAPH_DEPTH) {
+      fail("Local theme dependency graph exceeds its depth limit");
+    }
+    if (records.size >= MAX_LOCAL_GRAPH_FILES) {
+      fail("Local theme dependency graph exceeds its file count limit");
+    }
+    const pinned = pinnedLocalFile(path, base, budget);
+    const record = Object.freeze({
+      ...pinned,
+      snapshotName: uniqueSnapshotName(),
+    });
+    records.set(path, record);
+    const rewrites = [];
+    for (const reference of importReferences(record.source)) {
+      const dependency = localDependencyPath(
+        reference.specifier,
+        record.path,
+        base,
+      );
+      if (dependency !== undefined) {
+        const dependencyRecord = visit(dependency, depth + 1);
+        rewrites.push({
+          end: reference.end,
+          start: reference.start,
+          value: `./${dependencyRecord.snapshotName}`,
+        });
+        continue;
+      }
+      if (reference.specifier.startsWith("#")) {
+        fail("Local theme package-import aliases are not supported");
+      }
+      if (!reference.specifier.startsWith("node:")) {
+        let resolvedSpecifier;
+        try {
+          resolvedSpecifier = import.meta.resolve(
+            reference.specifier,
+            pathToFileURL(record.path).href,
+          );
+        } catch {
+          fail("Local theme package import could not be resolved");
+        }
+        rewrites.push({
+          end: reference.end,
+          start: reference.start,
+          value: resolvedSpecifier,
+        });
+      }
+    }
+    records.set(
+      path,
+      Object.freeze({
+        ...record,
+        source: rewriteSource(
+          record.source,
+          rewrites,
+          record.path,
+          outputBudget,
+          limits,
+        ),
+      }),
+    );
+    return records.get(path);
+  }
+
+  visit(entryPath, 0);
+  return Object.freeze({
+    entryName: records.get(entryPath).snapshotName,
+    records: Object.freeze([...records.values()]),
+  });
+}
+
+function revalidateLocalGraph(base, graph) {
+  let canonicalBase;
+  let baseStats;
+  try {
+    canonicalBase = realpathSync(base.requested);
+    baseStats = statSync(canonicalBase, { bigint: true });
+  } catch {
+    fail("Local theme base changed during graph snapshot");
+  }
+  if (
+    canonicalBase !== base.canonical ||
+    baseStats.dev !== base.identity.dev ||
+    baseStats.ino !== base.identity.ino
+  ) {
+    fail("Local theme base changed during graph snapshot");
+  }
+  for (const record of graph.records) {
+    let canonical;
+    let stats;
+    let linkStats;
+    try {
+      canonical = realpathSync(record.path);
+      stats = statSync(canonical, { bigint: true });
+      linkStats = lstatSync(record.path, { bigint: true });
+    } catch {
+      fail("Local theme dependency changed during graph snapshot");
+    }
+    if (
+      canonical !== record.path ||
+      linkStats.isSymbolicLink() ||
+      stats.dev !== record.identity.dev ||
+      stats.ino !== record.identity.ino ||
+      stats.size !== record.identity.size ||
+      stats.mtimeNs !== record.identity.mtimeNs ||
+      stats.ctimeNs !== record.identity.ctimeNs
+    ) {
+      fail("Local theme dependency changed during graph snapshot");
+    }
+  }
+}
+
+function matchingSnapshotFile(base, file) {
+  if (
+    dirname(file.path) !== base.canonical ||
+    !file.path.startsWith(join(base.canonical, ".402v-theme-snapshot-"))
+  ) {
+    return false;
+  }
+  try {
+    const stats = lstatSync(file.path, { bigint: true });
+    return (
+      !stats.isSymbolicLink() &&
+      stats.isFile() &&
+      stats.dev === file.identity.dev &&
+      stats.ino === file.identity.ino
+    );
+  } catch {
+    return false;
+  }
+}
+
+function removeSnapshotFiles(base, files) {
+  for (const file of files) {
+    if (!matchingSnapshotFile(base, file)) continue;
+    try {
+      unlinkSync(file.path);
+    } catch {}
+  }
+}
+
+function revalidateSnapshotFiles(base, files) {
+  if (!files.every((file) => matchingSnapshotFile(base, file))) {
+    fail("Local theme snapshot files changed before import");
+  }
+}
+
+function stageLocalGraph(base, graph) {
+  const files = [];
+  try {
+    for (const record of graph.records) {
+      const destination = join(base.canonical, record.snapshotName);
+      if (dirname(destination) !== base.canonical) {
+        fail("Local theme snapshot path escaped its tree");
+      }
+      let descriptor;
+      try {
+        descriptor = openSync(
+          destination,
+          constants.O_CREAT |
+            constants.O_EXCL |
+            constants.O_WRONLY |
+            (constants.O_NOFOLLOW ?? 0),
+          0o400,
+        );
+        const opened = fstatSync(descriptor, { bigint: true });
+        if (!opened.isFile()) {
+          fail("Local theme snapshot file could not be installed safely");
+        }
+        files.push(
+          Object.freeze({
+            identity: Object.freeze({ dev: opened.dev, ino: opened.ino }),
+            path: destination,
+          }),
+        );
+        writeFileSync(descriptor, record.source, "utf8");
+        const stats = fstatSync(descriptor, { bigint: true });
+        if (
+          !stats.isFile() ||
+          stats.dev !== opened.dev ||
+          stats.ino !== opened.ino ||
+          stats.size !== BigInt(Buffer.byteLength(record.source))
+        ) {
+          fail("Local theme snapshot file could not be installed safely");
+        }
+      } finally {
+        if (descriptor !== undefined) {
+          try {
+            closeSync(descriptor);
+          } catch {}
+        }
+      }
+    }
+    return Object.freeze({
+      entryPath: join(base.canonical, graph.entryName),
+      files: Object.freeze(files),
+    });
+  } catch (error) {
+    removeSnapshotFiles(base, files);
+    if (error instanceof ArtifactBuildError) throw error;
+    fail("Local theme snapshot files could not be installed safely");
+  }
+}
+
+function snapshotLimits(options) {
+  const requested = options?.maxSnapshotBytes;
+  if (
+    requested !== undefined &&
+    (!Number.isSafeInteger(requested) || requested <= 0)
+  ) {
+    fail("Local theme snapshot byte limit must be a positive safe integer");
+  }
+  const injected = requested ?? MAX_LOCAL_GRAPH_BYTES;
+  return Object.freeze({
+    fileBytes: Math.min(MAX_LOCAL_THEME_BYTES, injected),
+    graphBytes: Math.min(MAX_LOCAL_GRAPH_BYTES, injected),
+  });
 }
 
 function revalidate(base, module) {
@@ -271,7 +651,7 @@ function revalidate(base, module) {
   }
 }
 
-export async function loadTheme(specifier, baseDirectory) {
+export async function loadTheme(specifier, baseDirectory, options) {
   const selected = boundedString(
     specifier,
     MAX_THEME_SPECIFIER_BYTES,
@@ -283,28 +663,26 @@ export async function loadTheme(specifier, baseDirectory) {
 
   const base = canonicalDirectory(baseDirectory);
   const module = resolveThemeModule(selected, base);
-  const localSource = module.local ? snapshotLocalModule(module) : undefined;
-  revalidate(base, module);
-  const stagedPath =
-    localSource === undefined
-      ? undefined
-      : stageLocalSnapshot(module, localSource);
+  const graph = module.local
+    ? buildLocalGraph(module.path, base, snapshotLimits(options))
+    : undefined;
+  const snapshot = graph === undefined ? undefined : stageLocalGraph(base, graph);
   let namespace;
   try {
-    if (stagedPath !== undefined) revalidate(base, module);
+    if (graph === undefined) revalidate(base, module);
+    else {
+      revalidateLocalGraph(base, graph);
+      revalidateSnapshotFiles(base, snapshot.files);
+    }
     namespace = await import(
-      stagedPath === undefined
+      snapshot === undefined
         ? pathToFileURL(module.path).href
-        : pathToFileURL(stagedPath).href
+        : pathToFileURL(snapshot.entryPath).href
     );
   } catch {
     fail("Theme module could not be imported");
   } finally {
-    if (stagedPath !== undefined) {
-      try {
-        unlinkSync(stagedPath);
-      } catch {}
-    }
+    if (snapshot !== undefined) removeSnapshotFiles(base, snapshot.files);
   }
   if (!module.local) revalidate(base, module);
   const theme = namespace.default ?? namespace.theme402v;

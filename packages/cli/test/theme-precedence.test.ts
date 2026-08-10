@@ -1,6 +1,8 @@
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  readdirSync,
   renameSync,
   statSync,
   rmSync,
@@ -59,6 +61,15 @@ describe("CLI theme precedence", () => {
 });
 
 describe("loadTheme", () => {
+  it("assembles import rewrites with one linear join", () => {
+    const loader = readFileSync(
+      new URL("../src/theme-loader.mjs", import.meta.url),
+      "utf8",
+    );
+    expect(loader).toContain('return chunks.join("");');
+    expect(loader).not.toMatch(/rewritten\s*=.*rewritten\.slice/s);
+  });
+
   it("loads an explicit local default export contained by the selected directory", async () => {
     const root = temporaryRoot();
     writeFileSync(join(root, "theme.mjs"), themeSource("local-theme"));
@@ -84,6 +95,163 @@ describe("loadTheme", () => {
     await expect(loadTheme("./theme.mjs", root)).resolves.toMatchObject({
       id: "relative-theme",
     });
+  });
+
+  it("loads fresh relative dependency bytes on every invocation", async () => {
+    const root = temporaryRoot();
+    const helper = join(root, "helper.mjs");
+    writeFileSync(helper, 'export const themeId = "first-theme";\n');
+    writeFileSync(
+      join(root, "theme.mjs"),
+      `import { themeId } from "./helper.mjs";
+       export default {
+         themeContractVersion: 1, id: themeId, version: "1.0.0", displayName: themeId,
+         render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; }
+       };\n`,
+    );
+
+    await expect(loadTheme("./theme.mjs", root)).resolves.toMatchObject({
+      id: "first-theme",
+    });
+    writeFileSync(helper, 'export const themeId = "second-theme";\n');
+    await expect(loadTheme("./theme.mjs", root)).resolves.toMatchObject({
+      id: "second-theme",
+    });
+  });
+
+  it("never executes dependency replacement bytes introduced after graph pinning", async () => {
+    const root = temporaryRoot();
+    const sentinel = join(root, "dependency-attacker-ran");
+    const helper = join(root, "helper.mjs");
+    const replacement = join(root, "replacement-helper.mjs");
+    writeFileSync(helper, 'export const themeId = "consistent-theme";\n');
+    writeFileSync(
+      replacement,
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(sentinel)}, "ran");\nexport const themeId = "mixed-theme";\n`,
+    );
+    writeFileSync(
+      join(root, "theme.mjs"),
+      `import { themeId } from "./helper.mjs";
+       export default {
+         themeContractVersion: 1, id: themeId, version: "1.0.0", displayName: themeId,
+         render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; }
+       };\n`,
+    );
+
+    const pending = loadTheme("./theme.mjs", root);
+    renameSync(replacement, helper);
+
+    await expect(pending).resolves.toMatchObject({ id: "consistent-theme" });
+    expect(() => statSync(sentinel)).toThrow();
+  });
+
+  it("snapshots export-from and literal dynamic-import dependencies", async () => {
+    const root = temporaryRoot();
+    writeFileSync(join(root, "helper.mjs"), 'export const themeId = "graph-theme";\n');
+    writeFileSync(join(root, "bridge.mjs"), 'export { themeId } from "./helper.mjs";\n');
+    writeFileSync(
+      join(root, "theme.mjs"),
+      `import { themeId } from "./bridge.mjs";
+       const dynamic = await import("./helper.mjs");
+       if (dynamic.themeId !== themeId) throw new Error("mixed graph");
+       export default {
+         themeContractVersion: 1, id: themeId, version: "1.0.0", displayName: themeId,
+         render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; }
+       };\n`,
+    );
+
+    await expect(loadTheme("./theme.mjs", root)).resolves.toMatchObject({
+      id: "graph-theme",
+    });
+  });
+
+  it("rejects nonliteral dynamic imports before executing local code", async () => {
+    const root = temporaryRoot();
+    const sentinel = join(root, "nonliteral-ran");
+    writeFileSync(join(root, "helper.mjs"), 'export const themeId = "unsafe";\n');
+    writeFileSync(
+      join(root, "theme.mjs"),
+      `import { writeFileSync } from "node:fs";
+       writeFileSync(${JSON.stringify(sentinel)}, "ran");
+       const target = "./helper.mjs";
+       const { themeId } = await import(target);
+       export default { themeContractVersion: 1, id: themeId, version: "1.0.0", displayName: themeId, render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; } };\n`,
+    );
+
+    await expect(loadTheme("./theme.mjs", root)).rejects.toMatchObject({
+      code: "THEME_RESOLUTION_FAILED",
+    });
+    expect(() => statSync(sentinel)).toThrow();
+  });
+
+  it("rejects rewritten output expansion before allocating or executing", async () => {
+    const root = temporaryRoot();
+    const sentinel = join(root, "expanded-output-ran");
+    const packageRoot = join(root, "node_modules", "fixture-expander");
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(
+      join(packageRoot, "package.json"),
+      JSON.stringify({ name: "fixture-expander", type: "module", exports: "./index.mjs" }),
+    );
+    writeFileSync(join(packageRoot, "index.mjs"), "export {};\n");
+    writeFileSync(
+      join(root, "theme.mjs"),
+      `${Array.from({ length: 32 }, () => 'import "fixture-expander";').join("\n")}
+       import { writeFileSync } from "node:fs";
+       writeFileSync(${JSON.stringify(sentinel)}, "ran");
+       export default { themeContractVersion: 1, id: "x", version: "1.0.0", displayName: "x", render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; } };\n`,
+    );
+
+    await expect(
+      loadTheme("./theme.mjs", root, { maxSnapshotBytes: 2_048 }),
+    ).rejects.toMatchObject({ code: "THEME_RESOLUTION_FAILED" });
+    expect(() => statSync(sentinel)).toThrow();
+  });
+
+  it("rejects symlinked relative dependencies and bounded graph overflow", async () => {
+    const symlinkRoot = temporaryRoot();
+    writeFileSync(join(symlinkRoot, "real-helper.mjs"), 'export const value = "x";\n');
+    symlinkSync(join(symlinkRoot, "real-helper.mjs"), join(symlinkRoot, "helper.mjs"));
+    writeFileSync(
+      join(symlinkRoot, "theme.mjs"),
+      'import "./helper.mjs"; export default { themeContractVersion: 1, id: "x", version: "1.0.0", displayName: "x", render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; } };\n',
+    );
+    await expect(loadTheme("./theme.mjs", symlinkRoot)).rejects.toMatchObject({
+      code: "THEME_RESOLUTION_FAILED",
+    });
+
+    const countRoot = temporaryRoot();
+    const imports = [];
+    for (let index = 0; index < 65; index += 1) {
+      const name = `dependency-${index}.mjs`;
+      writeFileSync(join(countRoot, name), "export {};\n");
+      imports.push(`import "./${name}";`);
+    }
+    writeFileSync(
+      join(countRoot, "theme.mjs"),
+      `${imports.join("\n")}\nexport default { themeContractVersion: 1, id: "x", version: "1.0.0", displayName: "x", render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; } };\n`,
+    );
+    await expect(loadTheme("./theme.mjs", countRoot)).rejects.toMatchObject({
+      code: "THEME_RESOLUTION_FAILED",
+    });
+  });
+
+  it("always removes unique snapshot trees after success and import failure", async () => {
+    const root = temporaryRoot();
+    const snapshots = () =>
+      readdirSync(root).filter((name) => name.startsWith(".402v-theme-"));
+    writeFileSync(join(root, "theme.mjs"), themeSource("cleanup-theme"));
+    await loadTheme("./theme.mjs", root);
+    expect(snapshots()).toEqual([]);
+
+    writeFileSync(
+      join(root, "theme.mjs"),
+      'throw new Error("import failed"); export default {};\n',
+    );
+    await expect(loadTheme("./theme.mjs", root)).rejects.toMatchObject({
+      code: "THEME_RESOLUTION_FAILED",
+    });
+    expect(snapshots()).toEqual([]);
   });
 
   it("loads an installed package and chooses theme402v when default is absent", async () => {

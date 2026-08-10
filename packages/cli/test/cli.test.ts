@@ -545,6 +545,10 @@ describe("packed CLI binary", () => {
 
   it("contains only package.json and src, with an executable shebang binary", () => {
     const packedCli = join(consumerRoot, "node_modules", "@402v", "html-kit-cli");
+    const packedManifest = JSON.parse(
+      readFileSync(join(packedCli, "package.json"), "utf8"),
+    );
+    expect(packedManifest.dependencies.acorn).toBe("^8.15.0");
     expect(readFileSync(join(packedCli, "src", "cli.mjs"), "utf8")).toMatch(
       /^#!\/usr\/bin\/env node\n/,
     );
