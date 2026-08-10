@@ -1,33 +1,33 @@
 import type { ArtifactMetadata, ArtifactSlots } from "./contracts.mjs";
 
 export interface Heading {
-  id: string;
-  level: number;
-  text: string;
+  readonly id: string;
+  readonly level: number;
+  readonly text: string;
 }
 
 export interface PreparedSvg {
-  id: string;
-  label: string;
-  html: string;
-  byteLength?: number;
+  readonly id: string;
+  readonly label: string;
+  readonly html: string;
+  readonly byteLength?: number;
 }
 
 export interface ThemeRenderInput {
-  mode: "note" | "interactive";
-  metadata: ArtifactMetadata;
-  content: {
-    articleHtml?: string;
-    headings?: Heading[];
-    slots?: ArtifactSlots;
-    svg?: Record<string, PreparedSvg>;
+  readonly mode: "note" | "interactive";
+  readonly metadata: Readonly<ArtifactMetadata>;
+  readonly content: {
+    readonly articleHtml?: string;
+    readonly headings?: readonly Heading[];
+    readonly slots?: Readonly<ArtifactSlots>;
+    readonly svg?: Readonly<Record<string, PreparedSvg>>;
   };
 }
 
 export interface ThemeRenderResult {
-  lang: string;
-  styles: string;
-  bodyHtml: string;
+  readonly lang: string;
+  readonly styles: string;
+  readonly bodyHtml: string;
 }
 
 export interface ArtifactThemeV1 {

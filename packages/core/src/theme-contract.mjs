@@ -195,6 +195,7 @@ function cloneRenderInput(value) {
       fail("RESOURCE_LIMIT_EXCEEDED", "Theme render input exceeds resource limits");
     }
     budget.nodes -= 1;
+    if (current === undefined) return undefined;
     if (current === null || typeof current === "boolean") return current;
     if (typeof current === "string") {
       budget.bytes -= byteLength(current);
@@ -356,6 +357,7 @@ function validateRenderInput(input) {
     );
     let aggregateBytes = 0;
     for (const slot of Object.values(slots)) {
+      if (slot === undefined) continue;
       if (!isString(slot)) {
         fail("INVALID_THEME_INPUT", "Theme slots must contain strings");
       }

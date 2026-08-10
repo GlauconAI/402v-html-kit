@@ -374,6 +374,23 @@ describe("Theme Contract v1", () => {
     expectCode(() => renderThemeV1(theme(), aggregate), "RESOURCE_LIMIT_EXCEEDED");
   });
 
+  it("accepts explicitly undefined optional slot values without accounting them", () => {
+    const source = input();
+    Object.assign(source.content.slots, { footer: undefined });
+    const result = renderThemeV1(
+      theme((value) => {
+        const slots = (value as { content: { slots: Record<string, unknown> } })
+          .content.slots;
+        expect(Object.hasOwn(slots, "footer")).toBe(true);
+        expect(slots.footer).toBeUndefined();
+        expect(Object.isFrozen(slots)).toBe(true);
+        return safeResult;
+      }),
+      source,
+    );
+    expect(result).toEqual(safeResult);
+  });
+
   it("returns a new frozen result object", () => {
     const sourceResult = { ...safeResult };
     const result = renderThemeV1(theme(() => sourceResult), input());
