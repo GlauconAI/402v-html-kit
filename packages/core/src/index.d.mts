@@ -8,6 +8,7 @@ export {
 } from "./data-blocks.mjs";
 export { ARTIFACT_RESOURCE_LIMITS } from "./resource-limits.mjs";
 export { detectArtifactContract } from "./contracts.mjs";
+export { renderThemeV1 } from "./theme-contract.mjs";
 export interface ArtifactV2ThemeIdentity {
   id: string;
   version: string;
@@ -35,6 +36,14 @@ export type {
   ArtifactVerificationResult,
   VerifyArtifactHtmlOptions,
 } from "./contracts.mjs";
+
+export type {
+  ArtifactThemeV1,
+  Heading,
+  PreparedSvg,
+  ThemeRenderInput,
+  ThemeRenderResult,
+} from "./theme-contract.mjs";
 
 import type {
   ArtifactVerificationResult,

@@ -2,6 +2,12 @@ import { ArtifactBuildError } from "./errors.mjs";
 import { canonicalizeJson } from "./data-blocks.mjs";
 import { sumUtf8TextBytes } from "./data-accounting-v2.mjs";
 import { findMetaElements } from "./meta.mjs";
+import {
+  asciiLowercase,
+  isEventHandlerAttribute,
+  isNetworkSideEffectAttribute,
+  isUnsafePassiveNavigationUrl,
+} from "./html-safety.mjs";
 import { ARTIFACT_RESOURCE_LIMITS } from "./resource-limits.mjs";
 import {
   addUniqueMetaIssue,
@@ -26,8 +32,6 @@ const THEME_ID = /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}|@[A-Za-z0-9][A-Za-z0-9._-
 const THEME_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const LANGUAGE = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/;
 const REQUIRED_CORE_STYLE = ":where(html,body){max-width:100%;overflow-x:clip}:where([data-html-kit-root]){min-width:0;max-width:100%;overflow-wrap:anywhere}:where([data-html-kit-root] svg){max-width:100%;height:auto}";
-const PASSIVE_NAVIGATION_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
-const NETWORK_SIDE_EFFECT_ATTRIBUTES = new Set(["action", "formaction", "ping"]);
 
 function addUniqueMetaValueIssue(issues, document, name, code, label, predicate) {
   const matches = findMetaElements(document, name);
@@ -183,16 +187,10 @@ function verifyDocumentStructure(document, dataNodes, mode, issues) {
   }
 }
 
-function asciiLowercase(value) {
-  return value.replace(/[A-Z]/g, (character) =>
-    String.fromCharCode(character.charCodeAt(0) + 0x20),
-  );
-}
-
 function verifyEventHandlerAttributes(document, issues) {
   for (const element of document.querySelectorAll("*")) {
     for (const attribute of element.attributes) {
-      if (asciiLowercase(attribute.name).startsWith("on")) {
+      if (isEventHandlerAttribute(attribute.name)) {
         issues.push(
           issue(
             "UNSAFE_JAVASCRIPT",
@@ -202,16 +200,6 @@ function verifyEventHandlerAttributes(document, issues) {
       }
     }
   }
-}
-
-function normalizedUrlScheme(value) {
-  const colon = value.indexOf(":");
-  if (colon < 0) return undefined;
-  const candidate = asciiLowercase(value.slice(0, colon)).replace(
-    /[\u0000-\u0020\u007f]/g,
-    "",
-  );
-  return /^[a-z][a-z0-9+.-]*$/.test(candidate) ? candidate : undefined;
 }
 
 function verifyActiveUrls(document, issues) {
@@ -224,13 +212,12 @@ function verifyActiveUrls(document, issues) {
     }
     for (const attribute of element.attributes) {
       const name = asciiLowercase(attribute.name);
-      if (NETWORK_SIDE_EFFECT_ATTRIBUTES.has(name) || name === "background") {
+      if (isNetworkSideEffectAttribute(name)) {
         issues.push(issue("UNSAFE_URL", "Artifact contains a network side-effect attribute"));
         continue;
       }
       if (name === "href" || name === "xlink:href") {
-        const scheme = normalizedUrlScheme(attribute.value);
-        if (scheme !== undefined && !PASSIVE_NAVIGATION_SCHEMES.has(scheme)) {
+        if (isUnsafePassiveNavigationUrl(attribute.value)) {
           issues.push(issue("UNSAFE_URL", "Artifact contains an unsafe navigation URL"));
         }
       }
