@@ -227,6 +227,12 @@ function workerRequest(command: string, options: Record<string, unknown>) {
 }
 
 describe("workspace CLI process contract", () => {
+  it("uses one core update after one cheap public contract detection", () => {
+    const worker = readFileSync(workspaceWorker, "utf8");
+    expect(worker.match(/await updateArtifactData\(/g)).toHaveLength(1);
+    expect(worker).toContain("detectArtifactContract(");
+  });
+
   it("prints text only for explicit help", () => {
     const root = temporaryRoot();
     const help = runExecutable(process.execPath, [workspaceCli, "--help"], root);

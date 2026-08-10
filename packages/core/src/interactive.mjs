@@ -63,7 +63,11 @@ function invalidDataInput(message, options = undefined) {
 
 function inspectRenderOptions(options) {
   if (options === undefined) {
-    return { preservedData: undefined, replaceData: false };
+    return {
+      preservedData: undefined,
+      replaceData: false,
+      nodeBudgetMaximum: ARTIFACT_RESOURCE_LIMITS.canonicalJsonNodes,
+    };
   }
   if (options === null || typeof options !== "object") {
     invalidDataInput("render options must be a plain object");
@@ -89,7 +93,11 @@ function inspectRenderOptions(options) {
   }
 
   for (const key of keys) {
-    if (key !== "preservedData" && key !== "replaceData") {
+    if (
+      key !== "preservedData" &&
+      key !== "replaceData" &&
+      key !== "nodeBudgetMaximum"
+    ) {
       invalidDataInput("render options contain an unknown property");
     }
     const descriptor = descriptors[key];
@@ -108,9 +116,20 @@ function inspectRenderOptions(options) {
   if (typeof replaceData !== "boolean") {
     invalidDataInput("replaceData must be a boolean");
   }
+  const nodeBudgetMaximum =
+    descriptors.nodeBudgetMaximum?.value ??
+    ARTIFACT_RESOURCE_LIMITS.canonicalJsonNodes;
+  if (
+    !Number.isSafeInteger(nodeBudgetMaximum) ||
+    nodeBudgetMaximum < 1 ||
+    nodeBudgetMaximum > ARTIFACT_RESOURCE_LIMITS.canonicalJsonNodes
+  ) {
+    invalidDataInput("nodeBudgetMaximum must be a bounded positive integer");
+  }
   return {
     preservedData: descriptors.preservedData?.value,
     replaceData,
+    nodeBudgetMaximum,
   };
 }
 
@@ -314,23 +333,25 @@ function validateRendererResult(value) {
   return slots;
 }
 
+/** @param {unknown} manifest @param {any} [options] */
 export async function renderInteractiveModel(manifest, options = undefined) {
   const loadedManifest = inspectLoadedManifest(manifest);
   const { internals } = loadedManifest;
   const renderOptions = inspectRenderOptions(options);
   const nodeBudget = {
-    maximum: ARTIFACT_RESOURCE_LIMITS.canonicalJsonNodes,
-    remaining: ARTIFACT_RESOURCE_LIMITS.canonicalJsonNodes,
+    maximum: renderOptions.nodeBudgetMaximum,
+    remaining: renderOptions.nodeBudgetMaximum,
   };
 
-  const manifestData = invokeInternal(
-    internals,
-    "loadData",
-    "INVALID_DATA_BLOCK",
-    "Unable to load manifest data",
-    nodeBudget,
-  );
-  const data = renderOptions.replaceData ? new Map() : manifestData;
+  const data = renderOptions.replaceData
+    ? new Map()
+    : invokeInternal(
+        internals,
+        "loadData",
+        "INVALID_DATA_BLOCK",
+        "Unable to load manifest data",
+        nodeBudget,
+      );
   for (const [id, value] of canonicalPreservedData(
     renderOptions.preservedData,
     nodeBudget,

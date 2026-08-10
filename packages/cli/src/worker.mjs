@@ -5,7 +5,6 @@ import {
   linkSync,
   mkdirSync,
   openSync,
-  readFileSync,
   realpathSync,
   renameSync,
   statSync,
@@ -20,12 +19,14 @@ import {
   ARTIFACT_RESOURCE_LIMITS,
   buildInteractiveArtifact,
   buildNote,
+  detectArtifactContract,
   renderThemeV1,
   updateArtifactData,
   verifyArtifact,
 } from "@402v/html-kit-core";
 
 import { loadTheme, resolveThemeSelection } from "./theme-loader.mjs";
+import { readBoundedUtf8, readJsonValue } from "./json-input.mjs";
 
 const MAX_STRING_BYTES = 4_096;
 const MAX_REQUEST_STRING_BYTES = 32 * 1024;
@@ -221,50 +222,6 @@ async function execute(command, options) {
   return verify(options);
 }
 
-function readJsonValue(input) {
-  const requested = resolve(string(input, "inputPath"));
-  let path;
-  let before;
-  let bytes;
-  try {
-    path = realpathSync(requested);
-    const lexical = lstatSync(requested, { bigint: true });
-    before = statSync(path, { bigint: true });
-    if (
-      lexical.isSymbolicLink() ||
-      !before.isFile() ||
-      before.size > BigInt(ARTIFACT_RESOURCE_LIMITS.rawJsonBytes)
-    ) {
-      fail("INVALID_DATA_BLOCK", "JSON input must be one bounded regular file");
-    }
-    bytes = readFileSync(path);
-    const after = statSync(path, { bigint: true });
-    if (
-      after.dev !== before.dev ||
-      after.ino !== before.ino ||
-      after.size !== before.size ||
-      after.mtimeNs !== before.mtimeNs ||
-      after.ctimeNs !== before.ctimeNs
-    ) {
-      fail("INVALID_DATA_BLOCK", "JSON input changed while being read");
-    }
-  } catch (error) {
-    if (error instanceof ArtifactBuildError) throw error;
-    fail("INVALID_DATA_BLOCK", "JSON input could not be read safely");
-  }
-  let content;
-  try {
-    content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    fail("INVALID_DATA_BLOCK", "JSON input must contain strict UTF-8");
-  }
-  try {
-    return JSON.parse(content);
-  } catch {
-    fail("INVALID_DATA_BLOCK", "JSON input must contain one valid JSON value");
-  }
-}
-
 async function updateData(options) {
   assertExactKeys(
     options,
@@ -286,24 +243,28 @@ async function updateData(options) {
     fail("INVALID_CLI_ARGUMENTS", "upgradeContract only accepts 2");
   }
   const upgradeContract = options.upgradeContract;
+  const contract = detectArtifactContract(
+    readBoundedUtf8(artifactPath, {
+      maximumBytes: ARTIFACT_RESOURCE_LIMITS.artifactBytes,
+      code: "ARTIFACT_READ_FAILED",
+      label: "Artifact",
+    }),
+  );
+  if (contract.version === 1 && upgradeContract !== 2) {
+    throw new ArtifactBuildError(
+      "CONTRACT_UPGRADE_REQUIRED",
+      "Contract-v1 artifacts require explicit upgradeContract: 2",
+      { oldContract: 1, requiredContract: 2 },
+    );
+  }
   const coreOptions = {
     artifactPath,
     manifestPath,
     id,
-    value: null,
     force,
     ...(outputPath === undefined ? {} : { outputPath }),
     ...(upgradeContract === undefined ? {} : { upgradeContract }),
   };
-  try {
-    await updateArtifactData(coreOptions);
-    fail("UNEXPECTED_CLI_ERROR", "Theme probe unexpectedly completed an update");
-  } catch (error) {
-    if (!(error instanceof ArtifactBuildError) || error.code !== "INVALID_THEME") {
-      throw error;
-    }
-  }
-
   const value = readJsonValue(options.inputPath);
   const metadataTheme = await manifestTheme(manifestPath);
   const selected = await selectedTheme(options, metadataTheme);

@@ -22,6 +22,8 @@ import {
   updateArtifactData,
   verifyArtifact,
 } from "../src/index.mjs";
+import { renderInteractiveModel } from "../src/interactive.mjs";
+import { loadArtifactManifest } from "../src/manifest.mjs";
 
 const roots: string[] = [];
 
@@ -362,5 +364,37 @@ describe("artifact data updates", () => {
     );
     expect(readFileSync(fixture.artifactPath)).toEqual(sourceBefore);
     expect(readFileSync(outputPath, "utf8")).toBe("KEEP");
+  });
+
+  it("spends an injected replaceData budget only on preserved blocks", async () => {
+    const fixture = project();
+    writeFileSync(join(fixture.root, "assets", "registry.json"), "discarded-invalid-json");
+    writeFileSync(join(fixture.root, "assets", "untouched.json"), "discarded-invalid-json");
+    const manifest = await loadArtifactManifest(fixture.manifestPath);
+    const preservedData = new Map<string, unknown>([
+      ["registry", { items: [1, 2] }],
+      ["untouched", { keep: true }],
+    ]);
+
+    const model = await renderInteractiveModel(manifest, {
+      preservedData,
+      replaceData: true,
+      nodeBudgetMaximum: 8,
+    });
+
+    expect([...model.data.keys()]).toEqual(["registry", "untouched"]);
+    expect(model.data.get("registry")).toEqual({ items: [1, 2] });
+    expect(model.requiredDataBlocks).toEqual(["registry", "untouched"]);
+
+    const larger = Array.from({ length: 2_048 }, (_value, index) => index);
+    const largerModel = await renderInteractiveModel(manifest, {
+      preservedData: new Map<string, unknown>([
+        ["registry", { items: larger }],
+        ["untouched", { keep: true }],
+      ]),
+      replaceData: true,
+    });
+    expect((largerModel.data.get("registry") as { items: number[] }).items)
+      .toHaveLength(2_048);
   });
 });

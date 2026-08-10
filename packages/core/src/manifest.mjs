@@ -493,10 +493,14 @@ function createNodeBudget() {
   };
 }
 
-function loadCanonicalData(rootPath, rootIdentity, definitions) {
+function loadCanonicalData(
+  rootPath,
+  rootIdentity,
+  definitions,
+  nodeBudget = createNodeBudget(),
+) {
   const data = new Map();
   let rawBytes = 0;
-  const nodeBudget = createNodeBudget();
   for (const definition of definitions) {
     const { byteLength, content } = readTrustedUtf8(rootPath, definition.source, {
       maximumBytes: MAX_DATA_BYTES,
@@ -525,15 +529,6 @@ function loadCanonicalData(rootPath, rootIdentity, definitions) {
     data.set(definition.id, canonical);
   }
   return data;
-}
-
-function cloneCanonicalMap(data, nodeBudget) {
-  return new Map(
-    [...data.entries()].map(([id, value]) => [
-      id,
-      canonicalizeJson(value, { nodeBudget }),
-    ]),
-  );
 }
 
 function loadAggregateAssets(items, loader, maximumBytes, code, label) {
@@ -624,8 +619,6 @@ export async function loadArtifactManifest(manifestInput) {
     field(descriptors, "requiredDataBlocks"),
     dataIds,
   );
-  const initialData = loadCanonicalData(rootPath, rootIdentity, dataBlocks);
-
   const manifest = {
     contractVersion: 2,
     mode: "interactive",
@@ -643,7 +636,8 @@ export async function loadArtifactManifest(manifestInput) {
   manifestInternals.set(
     manifest,
     Object.freeze({
-      loadData: (nodeBudget) => cloneCanonicalMap(initialData, nodeBudget),
+      loadData: (nodeBudget) =>
+        loadCanonicalData(rootPath, rootIdentity, dataBlocks, nodeBudget),
       loadStyles: () =>
         loadAggregateAssets(
           styles,
