@@ -45,10 +45,13 @@ External setup is a gate: the public repository, npm scope/package ownership,
 GitHub `npm` environment, and npm trusted-publisher mapping for
 `.github/workflows/release.yml` must be confirmed before the tag is pushed. The
 repository ruleset must make signed annotated release tags matching `v*.*.*`
-immutable by preventing updates and deletion. The workflow has no npm token
-secret and resumably publishes the exact verified tarballs in core, theme, then
-CLI order. Existing registry releases are accepted only when integrity and
-SLSA v1 provenance match; mismatches or missing provenance fail closed.
+immutable by preventing updates and deletion, and must restrict tag creation to
+designated release maintainers or explicit ruleset bypass actors. The workflow
+has no npm token secret and resumably publishes the exact verified tarballs in
+core, theme, then CLI order. Existing registry releases are accepted only when
+npm verifies their Sigstore bundle and its subject integrity, source repository,
+workflow, tag ref, and commit match the verified release. Any mismatch, missing
+provenance, or verification failure fails closed.
 Publishing or deploying a downstream website is separate work and requires
 separate authorization.
 

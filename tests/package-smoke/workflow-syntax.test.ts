@@ -110,6 +110,10 @@ describe("GitHub workflow contracts", () => {
     expect(verifyTag.outputs).toEqual({
       commit: "${{ steps.verify.outputs.commit }}",
       version: "${{ steps.verify.outputs.version }}",
+      repository: "${{ steps.verify.outputs.repository }}",
+      workflow: "${{ steps.verify.outputs.workflow }}",
+      ref: "${{ steps.verify.outputs.ref }}",
+      tag: "${{ steps.verify.outputs.tag }}",
     });
     expect(verifyTag.steps.map((step: Record<string, unknown>) => step.uses).filter(Boolean)).toEqual([
       `actions/checkout@${actionPins["actions/checkout"]}`,
@@ -130,6 +134,17 @@ describe("GitHub workflow contracts", () => {
     expect(source).toContain("npm@11.12.1");
     expect(source).toContain("node .github/scripts/release.mjs prepare");
     expect(source).toContain("node .github/scripts/release.mjs publish");
+    for (const identity of [
+      "RELEASE_SOURCE_REPOSITORY: ${{ needs.verify-tag.outputs.repository }}",
+      "RELEASE_SOURCE_WORKFLOW: ${{ needs.verify-tag.outputs.workflow }}",
+      "RELEASE_SOURCE_REF: ${{ needs.verify-tag.outputs.ref }}",
+      "RELEASE_SOURCE_TAG: ${{ needs.verify-tag.outputs.tag }}",
+      "RELEASE_SOURCE_COMMIT: ${{ needs.verify-tag.outputs.commit }}",
+    ]) {
+      expect(source.match(new RegExp(identity.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "gu"))?.length).toBe(2);
+    }
+    const helperSource = readFileSync(new URL("../../.github/scripts/release.mjs", import.meta.url), "utf8");
+    expect(helperSource).toMatch(/npm[\s\S]*audit[\s\S]*signatures[\s\S]*--json[\s\S]*--include-attestations/u);
 
     const commands = (publish.steps as Record<string, string>[])
       .map((step) => step.run ?? "")

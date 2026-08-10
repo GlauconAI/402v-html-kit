@@ -125,9 +125,10 @@ repository, control the `@402v` npm scope and all three package names, configure
 the npm trusted publisher for `.github/workflows/release.yml` with GitHub
 environment `npm`, and apply required branch/environment protection. The GitHub
 repository ruleset must protect the `v*.*.*` tag pattern: release tags are
-immutable, signed, annotated tags and must not be updated or deleted. No GitHub
-repository creation, npm publication, or site deployment is performed by this
-source change.
+immutable, signed, annotated tags and must not be updated or deleted. Tag
+creation must be restricted to the designated release maintainers or explicit
+ruleset bypass actors. No GitHub repository creation, npm publication, or site
+deployment is performed by this source change.
 
 In npm settings for each of the three packages, the trusted publisher must name
 the eventual GitHub repository, workflow `.github/workflows/release.yml`, and
@@ -136,7 +137,9 @@ environment `npm`. A repository-level environment alone is insufficient.
 The trusted-publishing job is resumable after an interrupted run. It packs and
 verifies all three tarballs before publishing any of them, then skips a package
 only when the registry integrity and SLSA v1 provenance match the local
-tarball. An integrity mismatch or missing provenance fails closed.
+tarball. npm verifies the Sigstore attestation bundle; the workflow then binds
+its subject digest, repository, workflow path, tag ref, and commit to the
+verified release source. Any mismatch or missing provenance fails closed.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the
 [changelog](CHANGELOG.md). The code is licensed under the [MIT License](LICENSE).

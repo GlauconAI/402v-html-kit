@@ -167,6 +167,7 @@ describe("public documentation contract", () => {
     const releaseGovernance = `${read("README.md")}\n${read("CONTRIBUTING.md")}`;
     expect(releaseGovernance).toMatch(/ruleset[\s\S]*`v\*\.\*\.\*`/iu);
     expect(releaseGovernance).toMatch(/immutable[\s\S]*signed[\s\S]*tag/iu);
+    expect(releaseGovernance).toMatch(/tag creat(?:ion|ors?)[\s\S]*(?:release maintainer|bypass actor)/iu);
     expect(releaseGovernance).toMatch(/resum/iu);
     expect(releaseGovernance).toMatch(/integrity[\s\S]*provenance[\s\S]*fail(?:s|ed)? closed/iu);
     expect(read("CHANGELOG.md")).toContain("## [0.1.0]");

@@ -20,6 +20,10 @@ jobs:
     outputs:
       commit: ${{ steps.verify.outputs.commit }}
       version: ${{ steps.verify.outputs.version }}
+      repository: ${{ steps.verify.outputs.repository }}
+      workflow: ${{ steps.verify.outputs.workflow }}
+      ref: ${{ steps.verify.outputs.ref }}
+      tag: ${{ steps.verify.outputs.tag }}
     steps:
       - name: Check out pushed tag without repository credentials
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -30,9 +34,11 @@ jobs:
       - name: Require an exact verified annotated tag bound to HEAD
         id: verify
         env:
+          EVENT_REF: ${{ github.ref }}
           EVENT_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
           TAG: ${{ github.ref_name }}
         run: node .github/scripts/release.mjs verify-tag
 
@@ -77,6 +83,11 @@ jobs:
           RELEASE_PLAN_PATH: ${{ runner.temp }}/release-plan.json
           RELEASE_TARBALL_DIR: ${{ runner.temp }}/release-tarballs
           RELEASE_VERSION: ${{ needs.verify-tag.outputs.version }}
+          RELEASE_SOURCE_REPOSITORY: ${{ needs.verify-tag.outputs.repository }}
+          RELEASE_SOURCE_WORKFLOW: ${{ needs.verify-tag.outputs.workflow }}
+          RELEASE_SOURCE_REF: ${{ needs.verify-tag.outputs.ref }}
+          RELEASE_SOURCE_TAG: ${{ needs.verify-tag.outputs.tag }}
+          RELEASE_SOURCE_COMMIT: ${{ needs.verify-tag.outputs.commit }}
         run: node .github/scripts/release.mjs prepare
       # External gate: configure npm trusted publishers for this workflow,
       # repository, environment, and all three packages before pushing a tag.
@@ -84,4 +95,9 @@ jobs:
         env:
           RELEASE_PLAN_PATH: ${{ runner.temp }}/release-plan.json
           RELEASE_VERSION: ${{ needs.verify-tag.outputs.version }}
+          RELEASE_SOURCE_REPOSITORY: ${{ needs.verify-tag.outputs.repository }}
+          RELEASE_SOURCE_WORKFLOW: ${{ needs.verify-tag.outputs.workflow }}
+          RELEASE_SOURCE_REF: ${{ needs.verify-tag.outputs.ref }}
+          RELEASE_SOURCE_TAG: ${{ needs.verify-tag.outputs.tag }}
+          RELEASE_SOURCE_COMMIT: ${{ needs.verify-tag.outputs.commit }}
         run: node .github/scripts/release.mjs publish
