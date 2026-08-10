@@ -379,6 +379,30 @@ window.runtimeBindingPreserved = window.__htmlKitArtifact === originalRuntime;`,
     }
   });
 
+  it("rejects XML base rebasing during assembly and direct verification", () => {
+    const hostileBody = '<svg xml:base="https://example.invalid/remote.svg"><use href="#payload"/></svg>';
+    const base = {
+      mode: "note" as const,
+      metadata: { title: "XML base", description: "", eyebrow: "", lang: "en" },
+      theme: { id: "example", version: "1.0.0" },
+      dataBlocks: new Map<string, unknown>(),
+      consumerScripts: [],
+    };
+    expectVerificationIssue(
+      () => assembleArtifactV2({
+        ...base,
+        themeOutput: { ...themeOutput, bodyHtml: hostileBody },
+      }),
+      "UNSAFE_URL",
+    );
+
+    const safe = assembleArtifactV2({ ...base, themeOutput });
+    expectVerificationIssue(
+      () => verifyArtifactHtml(safe.replace("Hello</main>", `Hello${hostileBody}</main>`)),
+      "UNSAFE_URL",
+    );
+  });
+
   it("preserves passive user-initiated hyperlinks", () => {
     const links = [
       "#section",

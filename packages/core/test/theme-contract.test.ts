@@ -288,12 +288,29 @@ describe("Theme Contract v1", () => {
     ["srcset resource", '<img srcset="https://example.invalid/a.png 1x">'],
     ["poster resource", '<video poster="https://example.invalid/a.png"></video>'],
     ["object data resource", '<object data="https://example.invalid/a"></object>'],
+    ["XML base resource", '<svg xml:base="https://example.invalid/remote.svg"><use href="#payload"/></svg>'],
     ["form action", '<form action="https://example.invalid/submit"></form>'],
     ["formaction", '<button formaction="/submit">Submit</button>'],
     ["ping", '<a href="#safe" ping="https://example.invalid/audit">Safe</a>'],
     ["refresh", '<meta http-equiv="refresh" content="0;url=https://example.invalid/">'],
     ["background", '<table background="https://example.invalid/a.png"></table>'],
   ])("rejects hostile body construct: %s", (_label, bodyHtml) => {
+    expectCode(
+      () => renderThemeV1(theme(() => ({ ...safeResult, bodyHtml })), input()),
+      "UNSAFE_THEME_OUTPUT",
+    );
+  });
+
+  it.each([
+    ["explicit HTML body", "<body><main>x</main></body>"],
+    ["SVG link", "<svg><link></link></svg>"],
+    ["SVG base", "<svg><base></base></svg>"],
+    ["SVG form", "<svg><form></form></svg>"],
+    ["SVG html", "<svg><html></html></svg>"],
+    ["SVG head", "<svg><head></head></svg>"],
+    ["SVG body", "<svg><body></body></svg>"],
+    ["mismatched foreign close", "<svg></math><head></head></svg>"],
+  ])("rejects namespace-independent ownership element: %s", (_label, bodyHtml) => {
     expectCode(
       () => renderThemeV1(theme(() => ({ ...safeResult, bodyHtml })), input()),
       "UNSAFE_THEME_OUTPUT",

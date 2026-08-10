@@ -4,6 +4,7 @@ const NETWORK_SIDE_EFFECT_ATTRIBUTES = new Set([
   "background",
   "formaction",
   "ping",
+  "xml:base",
 ]);
 
 export function asciiLowercase(value) {

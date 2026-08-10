@@ -1,4 +1,4 @@
-import { parse } from "parse5";
+import { parse, Tokenizer } from "parse5";
 
 import { validateInlineStylesheet } from "./assets.mjs";
 import { DATA_BLOCK_ID } from "./data-blocks.mjs";
@@ -41,8 +41,9 @@ const MAX_RENDER_INPUT_DEPTH = 256;
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const RESOURCE_ATTRIBUTES = new Set(["data", "poster", "src", "srcset"]);
-const FORBIDDEN_HTML_ELEMENTS = new Set([
+const FORBIDDEN_ELEMENT_NAMES = new Set([
   "base",
+  "body",
   "form",
   "head",
   "html",
@@ -57,9 +58,9 @@ const FORBIDDEN_HTML_ELEMENTS = new Set([
   "script",
   "style",
   "template",
-  "title",
   "xmp",
 ]);
+const FOREIGN_DOCUMENT_OWNERSHIP_NAMES = new Set(["body", "head", "html"]);
 const FORBIDDEN_SVG_ELEMENTS = new Set([
   "animate",
   "animatemotion",
@@ -447,6 +448,45 @@ function validateHref(tagName, value) {
   }
 }
 
+function containsForeignDocumentOwnership(bodyHtml) {
+  const foreignRoots = [];
+  let unsafe = false;
+  const handler = {
+    onStartTag(token) {
+      if (
+        foreignRoots.length > 0 &&
+        FOREIGN_DOCUMENT_OWNERSHIP_NAMES.has(token.tagName)
+      ) {
+        unsafe = true;
+      }
+      if (
+        (token.tagName === "svg" || token.tagName === "math") &&
+        token.selfClosing !== true
+      ) {
+        foreignRoots.push(token.tagName);
+      }
+    },
+    onEndTag(token) {
+      if (token.tagName === "svg" || token.tagName === "math") {
+        const index = foreignRoots.lastIndexOf(token.tagName);
+        if (index >= 0) foreignRoots.splice(index, 1);
+      }
+    },
+    onComment() {},
+    onDoctype() {},
+    onEof() {},
+    onCharacter() {},
+    onNullCharacter() {},
+    onWhitespaceCharacter() {},
+  };
+  try {
+    new Tokenizer({}, handler).write(bodyHtml, true);
+  } catch {
+    fail("UNSAFE_THEME_OUTPUT", "Theme body HTML cannot be tokenized safely");
+  }
+  return unsafe;
+}
+
 function validateThemeBody(bodyHtml, stylesBytes) {
   const bodyBytes = byteLength(bodyHtml);
   if (
@@ -454,6 +494,9 @@ function validateThemeBody(bodyHtml, stylesBytes) {
     bodyBytes + stylesBytes > ARTIFACT_RESOURCE_LIMITS.artifactBytes
   ) {
     fail("RESOURCE_LIMIT_EXCEEDED", "Theme output exceeds resource limits");
+  }
+  if (containsForeignDocumentOwnership(bodyHtml)) {
+    fail("UNSAFE_THEME_OUTPUT", "Theme body contains document ownership markup");
   }
 
   let document;
@@ -481,8 +524,9 @@ function validateThemeBody(bodyHtml, stylesBytes) {
 
     const tagName = asciiLowercase(node.tagName);
     if (
+      (FORBIDDEN_ELEMENT_NAMES.has(tagName) && node.sourceCodeLocation != null) ||
       (node.namespaceURI === HTML_NAMESPACE &&
-        FORBIDDEN_HTML_ELEMENTS.has(tagName) &&
+        tagName === "title" &&
         node.sourceCodeLocation != null) ||
       (node.namespaceURI === SVG_NAMESPACE && FORBIDDEN_SVG_ELEMENTS.has(tagName))
     ) {
@@ -519,7 +563,7 @@ function validateThemeBody(bodyHtml, stylesBytes) {
       if (localName.startsWith("data-html-kit-")) {
         fail("UNSAFE_THEME_OUTPUT", "Theme body shadows an owned artifact protocol");
       }
-      if (isNetworkSideEffectAttribute(localName)) {
+      if (isNetworkSideEffectAttribute(qualifiedName)) {
         fail("UNSAFE_THEME_OUTPUT", "Theme body contains a network side-effect attribute");
       }
       if (localName === "href" || qualifiedName === "xlink:href") {
