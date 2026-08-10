@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a bounded change to a current public contract or workflow.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the concrete user problem without prescribing a large solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: State the smallest useful behavior and which package owns it.
+    validations:
+      required: true
+  - type: dropdown
+    id: package
+    attributes:
+      label: Primary package or contract
+      options:
+        - "@402v/html-kit-core"
+        - "@402v/html-kit-cli"
+        - "@402v/theme-402v"
+        - Artifact Contract v2
+        - Theme Contract v1
+        - Repository tooling or documentation
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and security impact
+      description: Explain effects on determinism, offline output, v1 reads, trust boundaries, and SemVer.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope confirmation
+      options:
+        - label: This request does not assume a hosted publisher, remote plugin loader, or untrusted-code sandbox already exists.
+          required: true

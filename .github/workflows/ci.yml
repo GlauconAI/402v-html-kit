@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - 22
+          - 24
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install from lockfile
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Confirm real Chrome
+        run: google-chrome --version
+      - name: Full tests, including deterministic examples and real Chrome
+        run: npm test
+
+  package:
+    name: Package, license, forbidden-content, and audit gates
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install from lockfile
+        run: npm ci
+      - name: Pack, clean-consumer, license, and forbidden scans
+        run: npm run pack:check
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
