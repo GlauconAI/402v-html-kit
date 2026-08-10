@@ -20,6 +20,14 @@ const cliPackage = fileURLToPath(new URL("../package.json", import.meta.url));
 const workspaceRoot = resolve(dirname(cliPackage), "../..");
 const workspaceCli = join(dirname(cliPackage), "src", "cli.mjs");
 const workspaceWorker = join(dirname(cliPackage), "src", "worker.mjs");
+const v1Interactive = join(
+  workspaceRoot,
+  "tests",
+  "compatibility",
+  "fixtures",
+  "v1",
+  "interactive.html",
+);
 const roots: string[] = [];
 
 type CliResult = {
@@ -381,11 +389,18 @@ describe("workspace CLI process contract", () => {
     )).toMatchObject({ command: "verify", mode: "interactive", issues: [] });
   }, 20_000);
 
-  it("keeps Task 10 update and preserve paths behind a stable no-write gate", () => {
+  it("keeps preserve unavailable and gives v1 update priority without imports", () => {
     const root = temporaryRoot();
     const manifest = writeInteractive(root);
-    writeFileSync(join(root, "artifact.html"), "sentinel");
-    writeFileSync(join(root, "input.json"), '{"ready":false}');
+    copyFileSync(v1Interactive, join(root, "artifact.html"));
+    const before = readFileSync(join(root, "artifact.html"));
+    const marker = join(root, "manifest-imported");
+    writeFileSync(
+      manifest,
+      `import { writeFileSync } from "node:fs";
+       writeFileSync(${JSON.stringify(marker)}, "yes");
+       export default {};`,
+    );
 
     const preserve = runExecutable(
       process.execPath,
@@ -404,17 +419,59 @@ describe("workspace CLI process contract", () => {
         "--manifest",
         basename(manifest),
         "--id",
-        "registry",
+        "project-registry",
         "--input",
-        "input.json",
-        "--upgrade-contract",
-        "2",
+        "missing-input.json",
       ],
       root,
     );
-    expect(expectJsonProcess(update, false).error.code).toBe("COMMAND_UNAVAILABLE");
-    expect(readFileSync(join(root, "artifact.html"), "utf8")).toBe("sentinel");
+    expect(expectJsonProcess(update, false).error.code).toBe("CONTRACT_UPGRADE_REQUIRED");
+    expect(existsSync(marker)).toBe(false);
+    expect(readFileSync(join(root, "artifact.html"))).toEqual(before);
   });
+
+  it("updates contract-v2 data through the CLI", () => {
+    const root = temporaryRoot();
+    const manifest = writeInteractive(root);
+    expectJsonProcess(
+      runExecutable(
+        process.execPath,
+        [workspaceCli, "build-artifact", basename(manifest)],
+        root,
+      ),
+      true,
+    );
+    writeFileSync(join(root, "input.json"), '{"ready":false,"source":"cli"}');
+
+    const update = expectJsonProcess(
+      runExecutable(
+        process.execPath,
+        [
+          workspaceCli,
+          "update-data",
+          "artifact.html",
+          "--manifest",
+          basename(manifest),
+          "--id",
+          "registry",
+          "--input",
+          "input.json",
+        ],
+        root,
+      ),
+      true,
+    );
+    expect(update).toMatchObject({
+      command: "update-data",
+      oldContract: 2,
+      newContract: 2,
+      theme: { id: "402v", version: "0.1.0" },
+      outputPath: join(root, "artifact.html"),
+    });
+    expect(readFileSync(join(root, "artifact.html"), "utf8")).toContain(
+      '"source": "cli"',
+    );
+  }, 20_000);
 
   it("bounds every direct worker string before pending or verify execution", async () => {
     const root = temporaryRoot();
@@ -575,4 +632,32 @@ describe("packed CLI binary", () => {
       theme: { id: "402v", version: "0.1.0" },
     });
   });
+
+  it("updates data through the packed CLI", () => {
+    const manifest = writeInteractive(consumerRoot);
+    expectJsonProcess(
+      runExecutable(binary, ["build-artifact", basename(manifest)], consumerRoot),
+      true,
+    );
+    writeFileSync(join(consumerRoot, "input.json"), '{"ready":false}');
+    const result = runExecutable(
+      binary,
+      [
+        "update-data",
+        "artifact.html",
+        "--manifest",
+        basename(manifest),
+        "--id",
+        "registry",
+        "--input",
+        "input.json",
+      ],
+      consumerRoot,
+    );
+    expect(expectJsonProcess(result, true)).toMatchObject({
+      command: "update-data",
+      oldContract: 2,
+      newContract: 2,
+    });
+  }, 30_000);
 });

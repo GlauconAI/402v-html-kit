@@ -129,7 +129,7 @@ function parse(values, cwd) {
         ...(parsed.theme === undefined ? {} : { theme: parsed.theme }),
         ...(parsed.upgradeContract === undefined
           ? {}
-          : { upgradeContract: parsed.upgradeContract }),
+          : { upgradeContract: 2 }),
       },
     };
   }

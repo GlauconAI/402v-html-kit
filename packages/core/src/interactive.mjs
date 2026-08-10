@@ -62,7 +62,9 @@ function invalidDataInput(message, options = undefined) {
 }
 
 function inspectRenderOptions(options) {
-  if (options === undefined) return undefined;
+  if (options === undefined) {
+    return { preservedData: undefined, replaceData: false };
+  }
   if (options === null || typeof options !== "object") {
     invalidDataInput("render options must be a plain object");
   }
@@ -87,7 +89,7 @@ function inspectRenderOptions(options) {
   }
 
   for (const key of keys) {
-    if (key !== "preservedData") {
+    if (key !== "preservedData" && key !== "replaceData") {
       invalidDataInput("render options contain an unknown property");
     }
     const descriptor = descriptors[key];
@@ -102,7 +104,14 @@ function inspectRenderOptions(options) {
       );
     }
   }
-  return descriptors.preservedData?.value;
+  const replaceData = descriptors.replaceData?.value ?? false;
+  if (typeof replaceData !== "boolean") {
+    invalidDataInput("replaceData must be a boolean");
+  }
+  return {
+    preservedData: descriptors.preservedData?.value,
+    replaceData,
+  };
 }
 
 function canonicalPreservedData(value, nodeBudget) {
@@ -308,20 +317,22 @@ function validateRendererResult(value) {
 export async function renderInteractiveModel(manifest, options = undefined) {
   const loadedManifest = inspectLoadedManifest(manifest);
   const { internals } = loadedManifest;
+  const renderOptions = inspectRenderOptions(options);
   const nodeBudget = {
     maximum: ARTIFACT_RESOURCE_LIMITS.canonicalJsonNodes,
     remaining: ARTIFACT_RESOURCE_LIMITS.canonicalJsonNodes,
   };
 
-  const data = invokeInternal(
+  const manifestData = invokeInternal(
     internals,
     "loadData",
     "INVALID_DATA_BLOCK",
     "Unable to load manifest data",
     nodeBudget,
   );
+  const data = renderOptions.replaceData ? new Map() : manifestData;
   for (const [id, value] of canonicalPreservedData(
-    inspectRenderOptions(options),
+    renderOptions.preservedData,
     nodeBudget,
   )) {
     data.set(id, value);

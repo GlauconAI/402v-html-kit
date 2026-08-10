@@ -5,6 +5,7 @@ import {
   linkSync,
   mkdirSync,
   openSync,
+  readFileSync,
   realpathSync,
   renameSync,
   statSync,
@@ -16,9 +17,11 @@ import { pathToFileURL } from "node:url";
 
 import {
   ArtifactBuildError,
+  ARTIFACT_RESOURCE_LIMITS,
   buildInteractiveArtifact,
   buildNote,
   renderThemeV1,
+  updateArtifactData,
   verifyArtifact,
 } from "@402v/html-kit-core";
 
@@ -214,32 +217,102 @@ async function execute(command, options) {
   if (command === "init") return initialize(options);
   if (command === "build") return build(options);
   if (command === "build-artifact") return buildArtifact(options);
-  if (command === "update-data") {
-    assertExactKeys(
-      options,
-      ["artifactPath", "baseDirectory", "force", "id", "inputPath", "manifestPath"],
-      ["outputPath", "theme", "upgradeContract"],
-    );
-    string(options.artifactPath, "artifactPath");
-    string(options.baseDirectory, "baseDirectory");
-    boolean(options.force, "force");
-    string(options.id, "id", false, MAX_DATA_BLOCK_ID_BYTES);
-    string(options.inputPath, "inputPath");
-    string(options.manifestPath, "manifestPath");
-    string(options.outputPath, "outputPath", true);
-    string(options.theme, "theme", true, 256);
-    if (
-      options.upgradeContract !== undefined &&
-      options.upgradeContract !== "2"
-    ) {
-      fail("INVALID_CLI_ARGUMENTS", "upgradeContract only accepts 2");
-    }
-    fail(
-      "COMMAND_UNAVAILABLE",
-      "update-data is unavailable until contract upgrade support is installed",
-    );
-  }
+  if (command === "update-data") return updateData(options);
   return verify(options);
+}
+
+function readJsonValue(input) {
+  const requested = resolve(string(input, "inputPath"));
+  let path;
+  let before;
+  let bytes;
+  try {
+    path = realpathSync(requested);
+    const lexical = lstatSync(requested, { bigint: true });
+    before = statSync(path, { bigint: true });
+    if (
+      lexical.isSymbolicLink() ||
+      !before.isFile() ||
+      before.size > BigInt(ARTIFACT_RESOURCE_LIMITS.rawJsonBytes)
+    ) {
+      fail("INVALID_DATA_BLOCK", "JSON input must be one bounded regular file");
+    }
+    bytes = readFileSync(path);
+    const after = statSync(path, { bigint: true });
+    if (
+      after.dev !== before.dev ||
+      after.ino !== before.ino ||
+      after.size !== before.size ||
+      after.mtimeNs !== before.mtimeNs ||
+      after.ctimeNs !== before.ctimeNs
+    ) {
+      fail("INVALID_DATA_BLOCK", "JSON input changed while being read");
+    }
+  } catch (error) {
+    if (error instanceof ArtifactBuildError) throw error;
+    fail("INVALID_DATA_BLOCK", "JSON input could not be read safely");
+  }
+  let content;
+  try {
+    content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    fail("INVALID_DATA_BLOCK", "JSON input must contain strict UTF-8");
+  }
+  try {
+    return JSON.parse(content);
+  } catch {
+    fail("INVALID_DATA_BLOCK", "JSON input must contain one valid JSON value");
+  }
+}
+
+async function updateData(options) {
+  assertExactKeys(
+    options,
+    ["artifactPath", "baseDirectory", "force", "id", "inputPath", "manifestPath"],
+    ["outputPath", "theme", "upgradeContract"],
+  );
+  const artifactPath = string(options.artifactPath, "artifactPath");
+  string(options.baseDirectory, "baseDirectory");
+  const force = boolean(options.force, "force");
+  const id = string(options.id, "id", false, MAX_DATA_BLOCK_ID_BYTES);
+  string(options.inputPath, "inputPath");
+  const manifestPath = string(options.manifestPath, "manifestPath");
+  const outputPath = string(options.outputPath, "outputPath", true);
+  string(options.theme, "theme", true, 256);
+  if (
+    options.upgradeContract !== undefined &&
+    options.upgradeContract !== 2
+  ) {
+    fail("INVALID_CLI_ARGUMENTS", "upgradeContract only accepts 2");
+  }
+  const upgradeContract = options.upgradeContract;
+  const coreOptions = {
+    artifactPath,
+    manifestPath,
+    id,
+    value: null,
+    force,
+    ...(outputPath === undefined ? {} : { outputPath }),
+    ...(upgradeContract === undefined ? {} : { upgradeContract }),
+  };
+  try {
+    await updateArtifactData(coreOptions);
+    fail("UNEXPECTED_CLI_ERROR", "Theme probe unexpectedly completed an update");
+  } catch (error) {
+    if (!(error instanceof ArtifactBuildError) || error.code !== "INVALID_THEME") {
+      throw error;
+    }
+  }
+
+  const value = readJsonValue(options.inputPath);
+  const metadataTheme = await manifestTheme(manifestPath);
+  const selected = await selectedTheme(options, metadataTheme);
+  const result = await updateArtifactData({
+    ...coreOptions,
+    value,
+    theme: selected.theme,
+  });
+  return { command: "update-data", ...result };
 }
 
 async function build(options) {

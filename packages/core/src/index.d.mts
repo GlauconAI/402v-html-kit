@@ -80,6 +80,33 @@ export declare function buildInteractiveArtifact(
   options: BuildInteractiveArtifactOptions,
 ): Promise<InteractiveBuildResult>;
 
+export interface UpdateArtifactDataOptions {
+  artifactPath: string;
+  manifestPath: string;
+  id: string;
+  value: unknown;
+  theme?: import("./theme-contract.mjs").ArtifactThemeV1;
+  outputPath?: string;
+  force?: boolean;
+  verifyDeterminism?: boolean;
+  upgradeContract?: 2;
+}
+
+export interface UpdateArtifactDataResult {
+  ok: true;
+  oldContract: 1 | 2;
+  newContract: 2;
+  theme: Readonly<ArtifactV2ThemeIdentity>;
+  sourceHash: string;
+  outputHash: string;
+  preservedBlockIds: string[];
+  outputPath: string;
+}
+
+export declare function updateArtifactData(
+  options: UpdateArtifactDataOptions,
+): Promise<UpdateArtifactDataResult>;
+
 export type {
   ArtifactContract,
   ArtifactVerificationResult,

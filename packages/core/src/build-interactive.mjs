@@ -252,9 +252,19 @@ function preparedSvgRegistry(entries) {
   return registry;
 }
 
-async function renderPipeline(manifestPath, theme, themeIdentity) {
+async function renderPipeline(
+  manifestPath,
+  theme,
+  themeIdentity,
+  preservedData = undefined,
+) {
   const manifest = await loadArtifactManifest(manifestPath);
-  const model = await renderInteractiveModel(manifest);
+  const model = await renderInteractiveModel(
+    manifest,
+    preservedData === undefined
+      ? undefined
+      : { preservedData, replaceData: true },
+  );
   const renderedTheme = renderThemeV1(theme, {
     mode: "interactive",
     metadata: model.metadata,
@@ -281,6 +291,50 @@ async function renderPipeline(manifestPath, theme, themeIdentity) {
     consumerScripts: sortedEntries(model.scripts).map((entry) => entry.content),
   });
   return { html, model };
+}
+
+export async function renderInteractiveArtifactWithData({
+  manifestPath: manifestInput,
+  theme: themeInput,
+  preservedData,
+  verifyDeterminism = true,
+}) {
+  const { identity: themeIdentity, snapshot: theme } = inspectTheme(themeInput);
+  const manifestPath = pathValue(manifestInput, "manifestPath");
+  const deterministic = booleanValue(
+    verifyDeterminism,
+    true,
+    "verifyDeterminism",
+  );
+  const first = await renderPipeline(
+    manifestPath,
+    theme,
+    themeIdentity,
+    preservedData,
+  );
+  if (deterministic) {
+    const second = await renderPipeline(
+      manifestPath,
+      theme,
+      themeIdentity,
+      preservedData,
+    );
+    if (second.html !== first.html) {
+      fail(
+        "NON_DETERMINISTIC_BUILD",
+        "Second render did not produce byte-identical HTML",
+      );
+    }
+  }
+  const verification = verifyArtifactHtml(first.html, {
+    requiredDataBlocks: first.model.requiredDataBlocks,
+  });
+  return {
+    ...first,
+    manifestPath,
+    themeIdentity,
+    verification,
+  };
 }
 
 export async function buildInteractiveArtifact(options) {
