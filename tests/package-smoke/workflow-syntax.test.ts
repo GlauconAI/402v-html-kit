@@ -16,6 +16,18 @@ function allRunCommands(value: Record<string, any>): string {
     .join("\n");
 }
 
+const actionPins = {
+  "actions/checkout": "d23441a48e516b6c34aea4fa41551a30e30af803",
+  "actions/setup-node": "249970729cb0ef3589644e2896645e5dc5ba9c38",
+} as const;
+
+function allUses(value: Record<string, any>): string[] {
+  return Object.values(value.jobs as Record<string, any>)
+    .flatMap((job) => job.steps ?? [])
+    .map((step: Record<string, unknown>) => step.uses)
+    .filter((uses): uses is string => typeof uses === "string");
+}
+
 describe("GitHub workflow contracts", () => {
   it("serializes test files for reliable plain npm test runs", async () => {
     const configUrl = new URL("../../vitest.config.ts", import.meta.url).href;
@@ -34,14 +46,19 @@ describe("GitHub workflow contracts", () => {
     expect(source.slice(start, end)).toMatch(/20_000\s*\);\s*$/u);
   });
 
-  it("runs every CI gate on Node 22 and 24 with current action pins", () => {
+  it("runs every CI gate on Node 22 and 24 with reviewed immutable action pins", () => {
     const ci = workflow("ci");
     expect(ci).toHaveProperty("on");
     expect(ci).toHaveProperty("jobs");
     const source = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
-    expect(source).toContain("actions/checkout@v6");
-    expect(source).toContain("actions/setup-node@v6");
-    expect(source).not.toMatch(/uses:\s+[^\s]+@(?!v6\b)/u);
+    expect(allUses(ci)).toEqual([
+      `actions/checkout@${actionPins["actions/checkout"]}`,
+      `actions/setup-node@${actionPins["actions/setup-node"]}`,
+      `actions/checkout@${actionPins["actions/checkout"]}`,
+      `actions/setup-node@${actionPins["actions/setup-node"]}`,
+    ]);
+    expect(source.match(/# v6/g)?.length).toBe(4);
+    expect(source).not.toMatch(/uses:\s+[^\s]+@v\d+/u);
 
     const jobs = ci.jobs as Record<string, any>;
     const matrixJob = Object.values(jobs).find(
@@ -69,22 +86,72 @@ describe("GitHub workflow contracts", () => {
     }
   });
 
-  it("publishes only signed exact SemVer tags through npm trusted publishing", () => {
+  it("isolates tag verification before trusted publishing and binds release to the verified commit", () => {
     const release = workflow("release");
     expect(release).toHaveProperty("on");
     expect(release).toHaveProperty("jobs");
-    expect(release.permissions).toEqual({ contents: "read", "id-token": "write" });
+    expect(release.permissions).toEqual({});
     const source = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
-    expect(source).toContain("actions/checkout@v6");
-    expect(source).toContain("actions/setup-node@v6");
+    expect(allUses(release)).toEqual([
+      `actions/checkout@${actionPins["actions/checkout"]}`,
+      `actions/checkout@${actionPins["actions/checkout"]}`,
+      `actions/setup-node@${actionPins["actions/setup-node"]}`,
+    ]);
+    expect(source.match(/# v6/g)?.length).toBe(3);
+    expect(source).not.toMatch(/uses:\s+[^\s]+@v\d+/u);
+    expect(release.concurrency).toEqual({
+      group: "release-${{ github.ref }}",
+      "cancel-in-progress": false,
+    });
+
+    const jobs = release.jobs as Record<string, any>;
+    const verifyTag = jobs["verify-tag"];
+    expect(verifyTag.permissions).toEqual({ contents: "read" });
+    expect(verifyTag.outputs).toEqual({
+      commit: "${{ steps.verify.outputs.commit }}",
+      version: "${{ steps.verify.outputs.version }}",
+    });
+    expect(verifyTag.steps.map((step: Record<string, unknown>) => step.uses).filter(Boolean)).toEqual([
+      `actions/checkout@${actionPins["actions/checkout"]}`,
+    ]);
+    const verifyCommands = (verifyTag.steps as Record<string, string>[])
+      .map((step) => step.run ?? "")
+      .join("\n");
+    expect(verifyCommands).toContain("node .github/scripts/release.mjs verify-tag");
+    expect(verifyCommands).not.toMatch(/\bnpm(?:\s|$)/u);
+
+    const publish = jobs.release;
+    expect(publish.needs).toBe("verify-tag");
+    expect(publish.permissions).toEqual({ contents: "read", "id-token": "write" });
+    expect(publish.environment).toBe("npm");
+    expect(publish.steps[0].with.ref).toBe("${{ needs.verify-tag.outputs.commit }}");
+    expect(publish.steps[0].with["persist-credentials"]).toBe(false);
     expect(source).toContain("node-version: 24");
     expect(source).toContain("npm@11.12.1");
-    expect(source).toContain("environment: npm");
-    expect(source).toMatch(/verification[\s\S]*verified/u);
-    expect(source).toContain("^v[0-9]+\\.[0-9]+\\.[0-9]+$");
-    expect(source).toMatch(/packages\/core\/package\.json[\s\S]*packages\/theme-402v\/package\.json[\s\S]*packages\/cli\/package\.json/u);
-    expect(source).toMatch(/npm publish --workspace @402v\/html-kit-core --access public --provenance[\s\S]*npm publish --workspace @402v\/theme-402v --access public --provenance[\s\S]*npm publish --workspace @402v\/html-kit-cli --access public --provenance/u);
+    expect(source).toContain("node .github/scripts/release.mjs prepare");
+    expect(source).toContain("node .github/scripts/release.mjs publish");
+
+    const commands = (publish.steps as Record<string, string>[])
+      .map((step) => step.run ?? "")
+      .join("\n");
+    const ordered = [
+      "git rev-parse HEAD",
+      "npm install --global npm@11.12.1",
+      "npm ci",
+      "npm run typecheck",
+      "npm test",
+      "npm run --silent pack:check",
+      "npm audit --omit=dev",
+      "node .github/scripts/release.mjs prepare",
+      "node .github/scripts/release.mjs publish",
+    ];
+    let previous = -1;
+    for (const command of ordered) {
+      const index = commands.indexOf(command);
+      expect(index, `${command} is missing or out of order`).toBeGreaterThan(previous);
+      previous = index;
+    }
+    expect(commands).toMatch(/npm run --silent pack:check\s*>\s*"?\$RUNNER_TEMP\/pack-gate\.json"?/u);
     expect(source).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN|secrets\./u);
-    expect(source).toMatch(/trusted publish|trusted publisher/iu);
   });
 });

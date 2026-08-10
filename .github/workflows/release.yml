@@ -5,91 +5,83 @@ on:
     tags:
       - "v*.*.*"
 
-permissions:
-  contents: read
-  id-token: write
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: Verify tag and publish synchronized packages
+  verify-tag:
+    name: Verify signed tag identity
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.verify.outputs.commit }}
+      version: ${{ steps.verify.outputs.version }}
+    steps:
+      - name: Check out pushed tag without repository credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require an exact verified annotated tag bound to HEAD
+        id: verify
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: node .github/scripts/release.mjs verify-tag
+
+  release:
+    name: Prepare and resumably publish verified tarballs
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     environment: npm
     steps:
-      - name: Check out signed tag
-        uses: actions/checkout@v6
+      - name: Check out the verified commit without repository credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 0
-      - name: Set up Node.js 24 and npm registry
-        uses: actions/setup-node@v6
+          ref: ${{ needs.verify-tag.outputs.commit }}
+          persist-credentials: false
+      - name: Require checkout HEAD to remain the verified commit
+        env:
+          VERIFIED_COMMIT: ${{ needs.verify-tag.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$VERIFIED_COMMIT"
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           cache: npm
       - name: Install reviewed npm with trusted publishing support
         run: npm install --global npm@11.12.1
       - name: Install from lockfile
         run: npm ci
-      - name: Require exact SemVer and synchronized package versions
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          node --input-type=module -e '
-            import { readFileSync } from "node:fs";
-            const tag = process.env.TAG;
-            if (!/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(tag)) {
-              throw new Error(`Release tag must be exact vX.Y.Z: ${tag}`);
-            }
-            const expected = tag.slice(1);
-            const paths = [
-              "packages/core/package.json",
-              "packages/theme-402v/package.json",
-              "packages/cli/package.json",
-            ];
-            for (const path of paths) {
-              const manifest = JSON.parse(readFileSync(path, "utf8"));
-              if (manifest.version !== expected) {
-                throw new Error(`${path} has ${manifest.version}; expected ${expected}`);
-              }
-            }
-          '
-      - name: Require a GitHub-verified signed annotated tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          node --input-type=module -e '
-            const headers = {
-              Accept: "application/vnd.github+json",
-              Authorization: `Bearer ${process.env.GH_TOKEN}`,
-              "X-GitHub-Api-Version": "2022-11-28",
-            };
-            const api = `https://api.github.com/repos/${process.env.REPOSITORY}`;
-            const refResponse = await fetch(`${api}/git/ref/tags/${encodeURIComponent(process.env.TAG)}`, { headers });
-            if (!refResponse.ok) throw new Error(`Unable to inspect tag ref: ${refResponse.status}`);
-            const ref = await refResponse.json();
-            if (ref.object?.type !== "tag") throw new Error("Release tag must be annotated, not lightweight");
-            const tagResponse = await fetch(`${api}/git/tags/${ref.object.sha}`, { headers });
-            if (!tagResponse.ok) throw new Error(`Unable to inspect annotated tag: ${tagResponse.status}`);
-            const tag = await tagResponse.json();
-            if (tag.tag !== process.env.TAG) throw new Error("Annotated tag name does not match the pushed ref");
-            if (tag.verification?.verified !== true) {
-              throw new Error(`GitHub did not verify the tag signature: ${tag.verification?.reason ?? "unknown"}`);
-            }
-          '
       - name: Typecheck
         run: npm run typecheck
       - name: Run full tests
         run: npm test
-      - name: Run package, license, and forbidden-content gates
-        run: npm run pack:check
+      - name: Capture package, license, and forbidden-content gate
+        run: npm run --silent pack:check > "$RUNNER_TEMP/pack-gate.json"
       - name: Audit production dependencies
         run: npm audit --omit=dev
-      # External gate: configure an npm trusted publisher for this workflow,
-      # environment, repository, and each of the three package settings first.
-      - name: Publish core with npm trusted publishing and provenance
-        run: npm publish --workspace @402v/html-kit-core --access public --provenance
-      - name: Publish theme with npm trusted publishing and provenance
-        run: npm publish --workspace @402v/theme-402v --access public --provenance
-      - name: Publish CLI with npm trusted publishing and provenance
-        run: npm publish --workspace @402v/html-kit-cli --access public --provenance
+      - name: Prepare and verify all persistent release tarballs
+        env:
+          PACK_GATE_PATH: ${{ runner.temp }}/pack-gate.json
+          RELEASE_PLAN_PATH: ${{ runner.temp }}/release-plan.json
+          RELEASE_TARBALL_DIR: ${{ runner.temp }}/release-tarballs
+          RELEASE_VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: node .github/scripts/release.mjs prepare
+      # External gate: configure npm trusted publishers for this workflow,
+      # repository, environment, and all three packages before pushing a tag.
+      - name: Resume trusted publishing with integrity and provenance checks
+        env:
+          RELEASE_PLAN_PATH: ${{ runner.temp }}/release-plan.json
+          RELEASE_VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: node .github/scripts/release.mjs publish

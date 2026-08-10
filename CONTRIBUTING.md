@@ -44,9 +44,13 @@ versions, and the trusted-publishing workflow.
 External setup is a gate: the public repository, npm scope/package ownership,
 GitHub `npm` environment, and npm trusted-publisher mapping for
 `.github/workflows/release.yml` must be confirmed before the tag is pushed. The
-workflow has no npm token secret and publishes core, theme, then CLI with
-provenance. Publishing or deploying a downstream website is separate work and
-requires separate authorization.
+repository ruleset must make signed annotated release tags matching `v*.*.*`
+immutable by preventing updates and deletion. The workflow has no npm token
+secret and resumably publishes the exact verified tarballs in core, theme, then
+CLI order. Existing registry releases are accepted only when integrity and
+SLSA v1 provenance match; mismatches or missing provenance fail closed.
+Publishing or deploying a downstream website is separate work and requires
+separate authorization.
 
 ## Reporting problems
 

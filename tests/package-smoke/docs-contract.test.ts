@@ -164,6 +164,11 @@ describe("public documentation contract", () => {
     expect(read("SECURITY.md")).toMatch(/Reporting a vulnerability[\s\S]*privately/iu);
     expect(read("CONTRIBUTING.md")).toMatch(/Semantic Versioning|SemVer/u);
     expect(read("CONTRIBUTING.md")).toMatch(/GlauconAI maintainers[\s\S]*release/iu);
+    const releaseGovernance = `${read("README.md")}\n${read("CONTRIBUTING.md")}`;
+    expect(releaseGovernance).toMatch(/ruleset[\s\S]*`v\*\.\*\.\*`/iu);
+    expect(releaseGovernance).toMatch(/immutable[\s\S]*signed[\s\S]*tag/iu);
+    expect(releaseGovernance).toMatch(/resum/iu);
+    expect(releaseGovernance).toMatch(/integrity[\s\S]*provenance[\s\S]*fail(?:s|ed)? closed/iu);
     expect(read("CHANGELOG.md")).toContain("## [0.1.0]");
     const pullRequest = read(".github/PULL_REQUEST_TEMPLATE.md");
     for (const requirement of [
