@@ -1,9 +1,3 @@
-import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { spawn } from "node:child_process";
-
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -11,147 +5,17 @@ import {
   renderThemeV1,
 } from "../../packages/core/src/index.mjs";
 import theme402v from "../../packages/theme-402v/src/index.mjs";
+import {
+  CdpConnection,
+  launchChrome,
+  stopChrome,
+} from "./chrome-harness.mjs";
 
 type CdpEvent = {
   method: string;
   params?: Record<string, unknown>;
   sessionId?: string;
 };
-
-class CdpConnection {
-  readonly socket: WebSocket;
-  #id = 0;
-  #pending = new Map<number, {
-    resolve: (value: Record<string, any>) => void;
-    reject: (reason: Error) => void;
-  }>();
-  #eventHandlers = new Set<(event: CdpEvent) => void>();
-
-  private constructor(socket: WebSocket) {
-    this.socket = socket;
-    socket.addEventListener("message", (message) => {
-      const payload = JSON.parse(String(message.data)) as CdpEvent & {
-        id?: number;
-        result?: Record<string, any>;
-        error?: { message?: string };
-      };
-      if (payload.id !== undefined) {
-        const pending = this.#pending.get(payload.id);
-        if (pending === undefined) return;
-        this.#pending.delete(payload.id);
-        if (payload.error !== undefined) {
-          pending.reject(new Error(payload.error.message ?? "CDP command failed"));
-        } else {
-          pending.resolve(payload.result ?? {});
-        }
-        return;
-      }
-      for (const handler of this.#eventHandlers) handler(payload);
-    });
-  }
-
-  static connect(url: string) {
-    return new Promise<CdpConnection>((resolve, reject) => {
-      const socket = new WebSocket(url);
-      socket.addEventListener("open", () => resolve(new CdpConnection(socket)), {
-        once: true,
-      });
-      socket.addEventListener(
-        "error",
-        () => reject(new Error(`Unable to connect to Chrome DevTools at ${url}`)),
-        { once: true },
-      );
-    });
-  }
-
-  onEvent(handler: (event: CdpEvent) => void) {
-    this.#eventHandlers.add(handler);
-    return () => this.#eventHandlers.delete(handler);
-  }
-
-  send(
-    method: string,
-    params: Record<string, unknown> = {},
-    sessionId?: string,
-  ) {
-    const id = ++this.#id;
-    return new Promise<Record<string, any>>((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params, sessionId }));
-    });
-  }
-
-  close() {
-    this.socket.close();
-  }
-}
-
-function chromeExecutable() {
-  const candidates = [
-    process.env.CHROME_PATH,
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-  ].filter((candidate): candidate is string => Boolean(candidate));
-  const executable = candidates.find((candidate) => existsSync(candidate));
-  if (executable === undefined) {
-    throw new Error(
-      `A real Chrome/Chromium executable is required; checked: ${candidates.join(", ")}`,
-    );
-  }
-  return executable;
-}
-
-async function launchChrome() {
-  const userDataDirectory = await mkdtemp(join(tmpdir(), "402v-theme-browser-"));
-  const child = spawn(
-    chromeExecutable(),
-    [
-      "--headless=new",
-      "--disable-background-networking",
-      "--disable-component-update",
-      "--disable-default-apps",
-      "--disable-extensions",
-      "--disable-sync",
-      "--metrics-recording-only",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--no-proxy-server",
-      "--password-store=basic",
-      "--use-mock-keychain",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${userDataDirectory}`,
-      "about:blank",
-    ],
-    { stdio: ["ignore", "ignore", "pipe"] },
-  );
-  const endpoint = await new Promise<string>((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error("Chrome did not expose a DevTools endpoint within 15 seconds")),
-      15_000,
-    );
-    let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-      const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
-      if (match !== null) {
-        clearTimeout(timeout);
-        resolve(match[1]);
-      }
-    });
-    child.once("exit", (code) => {
-      clearTimeout(timeout);
-      reject(new Error(`Chrome exited before startup (code ${code}): ${stderr}`));
-    });
-  });
-  return {
-    child,
-    connection: await CdpConnection.connect(endpoint),
-    userDataDirectory,
-  };
-}
 
 const wideSvg = '<div class="artifact-svg-frame"><svg class="artifact-svg" width="1200" height="240" viewBox="0 0 1200 240" role="img" aria-labelledby="wide-title"><title id="wide-title">Wide chart</title><rect width="1200" height="240"/></svg></div>';
 const metadata = {
@@ -298,15 +162,7 @@ describe("402v theme browser acceptance", () => {
 
   afterAll(async () => {
     if (browser === undefined) return;
-    const launchedBrowser = browser;
-    launchedBrowser.connection.close();
-    launchedBrowser.child.kill("SIGTERM");
-    await new Promise<void>((resolve) => {
-      if (launchedBrowser.child.exitCode !== null) return resolve();
-      launchedBrowser.child.once("exit", () => resolve());
-      setTimeout(resolve, 5_000);
-    });
-    await rm(launchedBrowser.userDataDirectory, { recursive: true, force: true });
+    await stopChrome(browser);
   });
 
   it.each([
