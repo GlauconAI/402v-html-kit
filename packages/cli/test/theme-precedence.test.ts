@@ -1,6 +1,8 @@
 import {
   mkdirSync,
   mkdtempSync,
+  renameSync,
+  statSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -67,6 +69,23 @@ describe("loadTheme", () => {
     });
   });
 
+  it("preserves contained relative imports when executing a pinned local snapshot", async () => {
+    const root = temporaryRoot();
+    writeFileSync(join(root, "helper.mjs"), 'export const themeId = "relative-theme";\n');
+    writeFileSync(
+      join(root, "theme.mjs"),
+      `import { themeId } from "./helper.mjs";
+       export default {
+         themeContractVersion: 1, id: themeId, version: "1.0.0", displayName: themeId,
+         render() { return { lang: "en", styles: "", bodyHtml: "<main></main>" }; }
+       };\n`,
+    );
+
+    await expect(loadTheme("./theme.mjs", root)).resolves.toMatchObject({
+      id: "relative-theme",
+    });
+  });
+
   it("loads an installed package and chooses theme402v when default is absent", async () => {
     const root = temporaryRoot();
     const packageRoot = join(root, "node_modules", "fixture-theme");
@@ -88,6 +107,50 @@ describe("loadTheme", () => {
       id: "package-theme",
       themeContractVersion: 1,
     });
+  });
+
+  it("uses createRequire resolution when a package exposes distinct require and import entries", async () => {
+    const root = temporaryRoot();
+    const packageRoot = join(root, "node_modules", "conditional-theme");
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(join(root, "package.json"), '{"name":"fixture-consumer","private":true}\n');
+    writeFileSync(
+      join(packageRoot, "package.json"),
+      JSON.stringify({
+        name: "conditional-theme",
+        type: "module",
+        exports: { import: "./import.mjs", require: "./require.cjs" },
+      }),
+    );
+    writeFileSync(join(packageRoot, "import.mjs"), themeSource("import-theme"));
+    writeFileSync(
+      join(packageRoot, "require.cjs"),
+      themeSource("require-theme")
+        .replace("export default", "module.exports =")
+        .replace(";\n", ";\n"),
+    );
+
+    await expect(loadTheme("conditional-theme", root)).resolves.toMatchObject({
+      id: "require-theme",
+    });
+  });
+
+  it("never executes replacement bytes introduced after a local module is pinned", async () => {
+    const root = temporaryRoot();
+    const sentinel = join(root, "attacker-ran");
+    const selected = join(root, "theme.mjs");
+    const replacement = join(root, "replacement.mjs");
+    writeFileSync(selected, themeSource("pinned-theme"));
+    writeFileSync(
+      replacement,
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(sentinel)}, "ran");\n${themeSource("replacement-theme")}`,
+    );
+
+    const pending = loadTheme("./theme.mjs", root);
+    renameSync(replacement, selected);
+
+    await expect(pending).resolves.toMatchObject({ id: "pinned-theme" });
+    expect(() => statSync(sentinel)).toThrow();
   });
 
   it.each([

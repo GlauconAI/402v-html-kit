@@ -2,6 +2,7 @@ import {
   closeSync,
   existsSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   realpathSync,
@@ -24,6 +25,9 @@ import {
 import { loadTheme, resolveThemeSelection } from "./theme-loader.mjs";
 
 const MAX_STRING_BYTES = 4_096;
+const MAX_REQUEST_STRING_BYTES = 32 * 1024;
+const MAX_DATA_BLOCK_ID_BYTES = 256;
+const MAX_REQUIRED_BLOCK_BYTES = 8 * 1024;
 const COMMAND_KEYS = Object.freeze({
   init: new Set(["baseDirectory", "directory", "force", "theme", "title"]),
   build: new Set(["baseDirectory", "force", "inputPath", "outputPath", "theme"]),
@@ -133,23 +137,39 @@ function inspectRequest(request) {
   if (typeof envelope.command !== "string" || !(envelope.command in COMMAND_KEYS)) {
     fail("INVALID_CLI_ARGUMENTS", "Worker request contains an unsupported command");
   }
+  const options = plainValues(
+    envelope.options,
+    COMMAND_KEYS[envelope.command],
+    "Worker options",
+  );
+  let aggregateBytes = 0;
+  for (const value of Object.values(options)) {
+    if (typeof value === "string") {
+      aggregateBytes += Buffer.byteLength(value, "utf8");
+    } else if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (typeof entry === "string") {
+          aggregateBytes += Buffer.byteLength(entry, "utf8");
+        }
+      }
+    }
+  }
+  if (aggregateBytes > MAX_REQUEST_STRING_BYTES) {
+    fail("INVALID_CLI_ARGUMENTS", "Worker request exceeds its aggregate string limit");
+  }
   return {
     command: envelope.command,
-    options: plainValues(
-      envelope.options,
-      COMMAND_KEYS[envelope.command],
-      "Worker options",
-    ),
+    options,
   };
 }
 
-function string(value, label, optional = false) {
+function string(value, label, optional = false, maximumBytes = MAX_STRING_BYTES) {
   if (optional && value === undefined) return undefined;
   if (
     typeof value !== "string" ||
     value.length === 0 ||
     value.includes("\0") ||
-    Buffer.byteLength(value, "utf8") > MAX_STRING_BYTES
+    Buffer.byteLength(value, "utf8") > maximumBytes
   ) {
     fail("INVALID_CLI_ARGUMENTS", `${label} must be a bounded non-empty string`);
   }
@@ -200,6 +220,20 @@ async function execute(command, options) {
       ["artifactPath", "baseDirectory", "force", "id", "inputPath", "manifestPath"],
       ["outputPath", "theme", "upgradeContract"],
     );
+    string(options.artifactPath, "artifactPath");
+    string(options.baseDirectory, "baseDirectory");
+    boolean(options.force, "force");
+    string(options.id, "id", false, MAX_DATA_BLOCK_ID_BYTES);
+    string(options.inputPath, "inputPath");
+    string(options.manifestPath, "manifestPath");
+    string(options.outputPath, "outputPath", true);
+    string(options.theme, "theme", true, 256);
+    if (
+      options.upgradeContract !== undefined &&
+      options.upgradeContract !== "2"
+    ) {
+      fail("INVALID_CLI_ARGUMENTS", "upgradeContract only accepts 2");
+    }
     fail(
       "COMMAND_UNAVAILABLE",
       "update-data is unavailable until contract upgrade support is installed",
@@ -308,8 +342,17 @@ function verify(options) {
     !Array.isArray(requiredDataBlocks) ||
     requiredDataBlocks.length > 32 ||
     requiredDataBlocks.some(
-      (value) => typeof value !== "string" || value.length === 0 || value.includes("\0"),
-    )
+      (value) =>
+        typeof value !== "string" ||
+        value.length === 0 ||
+        value.includes("\0") ||
+        Buffer.byteLength(value, "utf8") > MAX_DATA_BLOCK_ID_BYTES,
+    ) ||
+    new Set(requiredDataBlocks).size !== requiredDataBlocks.length ||
+    requiredDataBlocks.reduce(
+      (total, value) => total + Buffer.byteLength(value, "utf8"),
+      0,
+    ) > MAX_REQUIRED_BLOCK_BYTES
   ) {
     fail("INVALID_CLI_ARGUMENTS", "requiredDataBlocks must be a bounded string array");
   }
@@ -352,7 +395,9 @@ async function initialize(options) {
       }
     }
   }
-  for (const [name, content] of files) atomicContainedWrite(directory, name, content);
+  for (const [name, content] of files) {
+    atomicContainedWrite(directory, name, content, force);
+  }
   return {
     ok: true,
     command: "init",
@@ -381,7 +426,7 @@ function prepareStarterDirectory(directory) {
   }
 }
 
-function atomicContainedWrite(directory, name, content) {
+function atomicContainedWrite(directory, name, content, force) {
   const canonical = realpathSync(directory);
   const destination = resolve(canonical, name);
   if (!contained(canonical, destination) || dirname(destination) !== canonical) {
@@ -400,13 +445,21 @@ function atomicContainedWrite(directory, name, content) {
     if (realpathSync(directory) !== canonical || lstatSync(canonical).isSymbolicLink()) {
       fail("ATOMIC_WRITE_FAILED", "Starter directory changed during write");
     }
-    renameSync(temporary, destination);
+    if (force) {
+      renameSync(temporary, destination);
+    } else {
+      linkSync(temporary, destination);
+      unlinkSync(temporary);
+    }
   } catch (error) {
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch {}
     }
     try { unlinkSync(temporary); } catch {}
     if (error instanceof ArtifactBuildError) throw error;
+    if (!force && error?.code === "EEXIST") {
+      fail("OUTPUT_EXISTS", "Starter output appeared during installation");
+    }
     fail("ATOMIC_WRITE_FAILED", "Starter file could not be installed atomically");
   }
 }
