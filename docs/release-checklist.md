@@ -20,7 +20,7 @@ reproduced on 2026-08-10 (America/Vancouver).
   },
   "testTotals": {
     "baseline": { "files": 105, "tests": 703 },
-    "oss": { "files": 23, "tests": 393 },
+    "oss": { "files": 23, "packageCiTests": 393, "localRcTests": 394 },
     "site": { "files": 96, "passed": 524, "skipped": 1 }
   },
   "packages": [
@@ -68,9 +68,19 @@ reproduced on 2026-08-10 (America/Vancouver).
     }
   },
   "sitePublisher": {
+    "gate": "required-with-HTML_KIT_SITE_WORKTREE",
+    "tree": "31b0b196aaa0a107602e0f9a5e3bcf53d456c27f",
     "bytes": 16084,
     "sha256": "d47f767122691fe061d9d7f1948e87b4fdec49b13ef7a860afddd77e5131a056",
     "focusedTests": 14
+  },
+  "productionAudit": {
+    "command": "npm audit --omit=dev --json",
+    "observedAt": "2026-08-10T18:29:48Z",
+    "packageLockSha256": "e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc",
+    "high": 0,
+    "critical": 0,
+    "total": 0
   }
 }
 ```
@@ -109,25 +119,28 @@ theme files, and five CLI files.
 | --- | --- | --- |
 | clean lock install | `npm ci` | exit 0; lockfile-only install |
 | declarations | `npm run typecheck` | exit 0 |
-| full OSS suite | `npm test` | 23 files; 393 tests passed; real-Chrome cases included |
+| full OSS suite | `HTML_KIT_SITE_WORKTREE=<site-worktree> npm test` | 23 files; 394 tests passed; real Chrome and local cross-repository gate included |
 | v1 compatibility | `npm test -- tests/compatibility` | frozen hashes, contract-v1 mutation rejection, and explicit contract-v1 upgrade passed |
 | browser acceptance | `npm test -- tests/browser` | desktop/mobile note, interactive, and custom-theme cases passed with zero external requests |
 | package boundary | `npm run pack:check` | clean offline consumer passed; file counts 5/38/6; 148 production license entries |
-| production audit | `npm audit --omit=dev` | 0 high; 0 critical; 0 total production vulnerabilities |
+| production audit | `npm audit --omit=dev --json` | fresh registry result at `2026-08-10T18:29:48Z`: 0 high, 0 critical, 0 total; lock SHA-256 `e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc` |
 | license scan | `npm run pack:check` | all 148 package/version rows matched the reviewed SPDX allowlist |
 | forbidden/secret scan | `npm run pack:check` | no credential, private-infrastructure, host-path, or unapproved brand hit |
 | formatting | `git diff --check` | exit 0 |
 
 The release aggregator reruns the clean packed consumer directly, invokes only
 the isolated packed-example test (it never recursively invokes the root test
-suite), recomputes fixture and example hashes, repacks all three workspaces,
-and performs a cached/offline production audit. A networked production audit
-was also run as the explicit release gate above.
+suite), recomputes fixture and example hashes, and repacks all three workspaces.
+It does not treat npm's offline audit output as vulnerability evidence. The
+registry-backed audit above is an explicit producer/release gate; the
+aggregator binds its timestamped result to the exact lockfile hash and verifies
+that both CI and release workflows retain the authoritative online command.
 
 ## Deterministic contract-v2 examples
 
-The source files were copied to a new temporary directory, built twice through
-the CLI, verified as contract v2, and hashed. The results were:
+The hashes below are workspace-source CLI outputs: source files were copied to
+a new temporary directory, built through the CLI, verified as contract v2, and
+hashed. The results were:
 
 ```text
 note          16351 bytes  496947be80e64d446fde0a5fe998a5e132de7f6043dacc07946f55ce4b13b6bc
@@ -135,8 +148,10 @@ interactive   16585 bytes  80cc0e39f90d06dc78409895e6ffa7098a70e44406f596164d75a
 custom theme   1596 bytes  f40ec6a6b02e6c75d06f94edb26f90646e0812548f1050d6b2e9a645001ec7aa
 ```
 
-The packed-consumer test separately proves that the same three source classes
-build and verify without resolving workspace packages or host `node_modules`.
+This hash record is not presented as packed-consumer output. The independent
+packed-consumer test separately proves that all three source classes build
+twice with identical bytes and verify without resolving workspace packages or
+host `node_modules`.
 
 ## Compatibility and site-adapter evidence
 
@@ -145,21 +160,30 @@ that updates without `upgradeContract: 2` fail with
 `CONTRACT_UPGRADE_REQUIRED`, and that an explicit contract-v1 upgrade produces
 deterministic verified contract-v2 bytes without mutating its source.
 
-In the isolated site-integration worktree, this focused command was run:
+The site adapter is a separate local RC gate. Public package CI has no site
+checkout, so the conditional test is skipped when `HTML_KIT_SITE_WORKTREE` is
+absent: package-only CI therefore records 393 passing tests plus this one
+explicit skip. A local release-candidate decision is incomplete until the
+variable is set to the isolated site-integration worktree and all 394 tests,
+including this command, pass:
 
 ```text
-$ npm test -- tests/publish-html-cli.test.ts
+$ HTML_KIT_SITE_WORKTREE=<site-worktree> npm test -- tests/release/acceptance.test.ts
 Test Files  1 passed (1)
-Tests       14 passed (14)
+Tests       8 passed (8)
 ```
 
-The dry-run test sends the same strictly decoded string that passed package
-verification. Its source and payload are each **16,084 bytes**, with SHA-256
+That gate requires exact HEAD
+`f7b2a60c522f3cba48168de8a70e5642ef58fab2`, exact tree
+`31b0b196aaa0a107602e0f9a5e3bcf53d456c27f`, and an empty worktree. It then
+runs the site's focused publisher suite (14/14) and directly invokes the
+publisher in dry-run mode. The published string and site-owned input are each
+**16,084 bytes**, with SHA-256
 `d47f767122691fe061d9d7f1948e87b4fdec49b13ef7a860afddd77e5131a056`.
-That value is also recomputed from the local frozen fixture by the release
-aggregator. The complete site suite at the integration commit measured 96 test
-files, 524 passed tests, and one opt-in clean-export test skipped; its dedicated
-clean-export install gate passed separately.
+The gate compares those bytes directly; it does not infer site behavior from
+the OSS fixture. The complete site suite at the integration commit measured 96
+test files, 524 passed tests, and one opt-in clean-export test skipped; its
+dedicated clean-export install gate passed separately.
 
 ## Known limitations and Rollback
 

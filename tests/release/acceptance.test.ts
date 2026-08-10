@@ -6,13 +6,20 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
+
+import {
+  controlledNpmEnvironment,
+  sanitizedEnvironment,
+} from "../package-smoke/pack-smoke.mjs";
 
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const checklistPath = join(workspaceRoot, "docs/release-checklist.md");
@@ -74,7 +81,7 @@ type ReleaseEvidence = {
   commits: { baseline: string; oss: string; siteIntegration: string };
   testTotals: {
     baseline: { files: number; tests: number };
-    oss: { files: number; tests: number };
+    oss: { files: number; packageCiTests: number; localRcTests: number };
     site: { files: number; passed: number; skipped: number };
   };
   packages: Array<{
@@ -87,7 +94,21 @@ type ReleaseEvidence = {
   }>;
   frozenV1: Record<string, string>;
   examples: typeof expectedExamples;
-  sitePublisher: { bytes: number; sha256: string; focusedTests: number };
+  sitePublisher: {
+    gate: "required-with-HTML_KIT_SITE_WORKTREE";
+    tree: string;
+    bytes: number;
+    sha256: string;
+    focusedTests: number;
+  };
+  productionAudit: {
+    command: "npm audit --omit=dev --json";
+    observedAt: string;
+    packageLockSha256: string;
+    high: number;
+    critical: number;
+    total: number;
+  };
 };
 
 function read(relativePath: string) {
@@ -104,24 +125,88 @@ function run(
   executable: string,
   args: readonly string[],
   timeout: number,
-  environment: Record<string, string> = {},
+  options: {
+    cwd?: string;
+    inheritedEnvironment?: NodeJS.ProcessEnv;
+    offline?: boolean;
+    seedProductionCache?: boolean;
+  } = {},
 ) {
-  return spawnSync(executable, [...args], {
-    cwd: workspaceRoot,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      CI: "true",
-      NODE_PATH: "",
+  const root = mkdtempSync(join(tmpdir(), "402v-rc-child-env-"));
+  const cache = join(root, "npm-cache");
+  const prefix = join(root, "npm-prefix");
+  const userConfig = join(root, "user.npmrc");
+  const globalConfig = join(root, "global.npmrc");
+  mkdirSync(cache);
+  mkdirSync(prefix);
+  writeFileSync(userConfig, "");
+  writeFileSync(globalConfig, "");
+  try {
+    if (options.seedProductionCache === true) seedProductionCache(cache);
+    const environment = {
+      ...sanitizedEnvironment(options.inheritedEnvironment ?? process.env),
+      ...controlledNpmEnvironment({
+        cache,
+        globalConfig,
+        ignoreScripts: true,
+        offline: options.offline ?? true,
+        prefix,
+        userConfig,
+      }),
       NO_COLOR: "1",
-      npm_config_audit: "false",
-      npm_config_fund: "false",
-      npm_config_offline: "true",
-      npm_config_update_notifier: "false",
-      ...environment,
-    },
-    timeout,
-  });
+    };
+    return spawnSync(executable, [...args], {
+      cwd: options.cwd ?? workspaceRoot,
+      encoding: "utf8",
+      env: environment,
+      timeout,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function cacheContentPath(cacheRoot: string, integrity: string) {
+  const match = integrity.match(/^([a-z0-9]+)-(.+)$/iu);
+  if (match === null) throw new Error(`Unsupported lock integrity: ${integrity}`);
+  const hex = Buffer.from(match[2], "base64").toString("hex");
+  return join(
+    cacheRoot,
+    "_cacache",
+    "content-v2",
+    match[1],
+    hex.slice(0, 2),
+    hex.slice(2, 4),
+    hex.slice(4),
+  );
+}
+
+function seedProductionCache(destinationRoot: string) {
+  const canonical = sanitizedEnvironment() as Record<string, string | undefined>;
+  const sourceRoot = process.platform === "win32"
+    ? join(canonical.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "npm-cache")
+    : join(canonical.HOME ?? homedir(), ".npm");
+  const lock = JSON.parse(read("package-lock.json")) as {
+    packages: Record<string, { dev?: boolean; integrity?: string; optional?: boolean }>;
+  };
+  for (const [path, entry] of Object.entries(lock.packages)) {
+    if (
+      !path.startsWith("node_modules/") ||
+      path.startsWith("node_modules/@402v/") ||
+      entry.dev === true ||
+      entry.integrity === undefined
+    ) {
+      continue;
+    }
+    const source = cacheContentPath(sourceRoot, entry.integrity);
+    if (!existsSync(source)) {
+      if (entry.optional === true) continue;
+      throw new Error(`Required production tarball is absent from the npm cache: ${path}`);
+    }
+    const destination = cacheContentPath(destinationRoot, entry.integrity);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(source, destination);
+  }
 }
 
 function expectSuccess(result: ReturnType<typeof spawnSync>) {
@@ -182,17 +267,8 @@ function buildExampleHashes() {
     ] as const;
     return Object.fromEntries(
       cases.map(({ key, directory, args }) => {
-        const result = spawnSync(process.execPath, [cli, ...args], {
+        const result = run(process.execPath, [cli, ...args], 30_000, {
           cwd: join(root, directory),
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            NODE_PATH: "",
-            NO_COLOR: "1",
-            npm_config_offline: "true",
-            npm_config_update_notifier: "false",
-          },
-          timeout: 30_000,
         });
         expectSuccess(result);
         const output = readFileSync(join(root, directory, "output.html"));
@@ -212,14 +288,12 @@ function buildExampleHashes() {
 
 function packSha256s() {
   const root = mkdtempSync(join(tmpdir(), "402v-rc-acceptance-pack-"));
-  const cache = join(root, "npm-cache");
-  mkdirSync(cache);
   try {
     for (const packageDefinition of expectedPackages) {
       const npmCli = process.env.npm_execpath;
       const executable = npmCli === undefined ? "npm" : process.execPath;
       const prefix = npmCli === undefined ? [] : [npmCli];
-      const result = spawnSync(
+      const result = run(
         executable,
         [
           ...prefix,
@@ -231,19 +305,7 @@ function packSha256s() {
           "--pack-destination",
           root,
         ],
-        {
-          cwd: workspaceRoot,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            NODE_PATH: "",
-            NO_COLOR: "1",
-            npm_config_cache: cache,
-            npm_config_offline: "true",
-            npm_config_update_notifier: "false",
-          },
-          timeout: 30_000,
-        },
+        30_000,
       );
       expectSuccess(result);
     }
@@ -270,6 +332,97 @@ function listedTestTotals() {
 }
 
 describe.sequential("local release candidate acceptance", () => {
+  it("rejects inherited preload and npm resolution configuration", () => {
+    const root = mkdtempSync(join(tmpdir(), "402v-rc-preload-red-"));
+    const preload = join(root, "preload.cjs");
+    const marker = join(root, "injected");
+    writeFileSync(preload, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "injected")`);
+    try {
+      const result = run(process.execPath, ["-e", ""], 10_000, {
+        inheritedEnvironment: {
+          ...process.env,
+          INIT_CWD: "/host/init-must-not-propagate",
+          NODE_OPTIONS: `--require=${preload}`,
+          NODE_PATH: "/host/modules-must-not-resolve",
+          npm_config_userconfig: "/host/config-must-not-be-used",
+        },
+      });
+      expectSuccess(result);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.env.HTML_KIT_SITE_WORKTREE === undefined)(
+    "requires the exact local site integration worktree",
+    () => {
+      const siteWorktree = realpathSync(process.env.HTML_KIT_SITE_WORKTREE!);
+      expect(existsSync(join(siteWorktree, "package.json"))).toBe(true);
+
+      const head = run("git", ["rev-parse", "HEAD"], 10_000, { cwd: siteWorktree });
+      const tree = run("git", ["rev-parse", "HEAD^{tree}"], 10_000, {
+        cwd: siteWorktree,
+      });
+      const status = run(
+        "git",
+        ["status", "--porcelain=v1", "--untracked-files=all"],
+        10_000,
+        { cwd: siteWorktree },
+      );
+      for (const result of [head, tree, status]) expectSuccess(result);
+      expect(head.stdout.trim()).toBe(
+        "f7b2a60c522f3cba48168de8a70e5642ef58fab2",
+      );
+      expect(tree.stdout.trim()).toBe("31b0b196aaa0a107602e0f9a5e3bcf53d456c27f");
+      expect(status.stdout).toBe("");
+
+      const focused = run(
+        process.execPath,
+        [
+          join(siteWorktree, "node_modules/vitest/vitest.mjs"),
+          "run",
+          "tests/publish-html-cli.test.ts",
+        ],
+        60_000,
+        { cwd: siteWorktree },
+      );
+      expectSuccess(focused);
+      expect(focused.stdout).toMatch(/Test Files\s+1 passed/u);
+      expect(focused.stdout).toMatch(/Tests\s+14 passed/u);
+
+      const inputPath = join(siteWorktree, "tests/fixtures/standalone-v1.html");
+      const input = readFileSync(inputPath);
+      const publisher = run(
+        process.execPath,
+        [
+          "scripts/publish-html.mjs",
+          "--input",
+          inputPath,
+          "--title",
+          "RC cross-repository proof",
+          "--slug",
+          "rc-cross-repository-proof",
+          "--author-id",
+          "00000000-0000-0000-0000-000000000001",
+          "--dry-run",
+        ],
+        30_000,
+        { cwd: siteWorktree },
+      );
+      expectSuccess(publisher);
+      expect(publisher.stderr).toBe("");
+      const payload = JSON.parse(publisher.stdout) as { content_html: string };
+      const published = Buffer.from(payload.content_html, "utf8");
+      expect(published).toEqual(input);
+      expect(published.byteLength).toBe(16_084);
+      expect(createHash("sha256").update(published).digest("hex")).toBe(
+        "d47f767122691fe061d9d7f1948e87b4fdec49b13ef7a860afddd77e5131a056",
+      );
+    },
+    120_000,
+  );
+
   it("has matching package versions recorded in the changelog", () => {
     const versions = packagePaths.map(
       (path) => JSON.parse(read(path)).version as string,
@@ -312,6 +465,7 @@ describe.sequential("local release candidate acceptance", () => {
         "builds and verifies every example twice with identical bytes",
       ],
       180_000,
+      { seedProductionCache: true },
     );
     expectSuccess(result);
     expect(result.stdout).toMatch(/1 passed\s*\|\s*10 skipped/u);
@@ -342,17 +496,6 @@ describe.sequential("local release candidate acceptance", () => {
     );
   }, 190_000);
 
-  it("has no cached production high or critical advisory", () => {
-    const npmCli = process.env.npm_execpath;
-    const result = npmCli
-      ? run(process.execPath, [npmCli, "audit", "--omit=dev", "--json", "--offline"], 30_000)
-      : run("npm", ["audit", "--omit=dev", "--json", "--offline"], 30_000);
-    expectSuccess(result);
-    const report = JSON.parse(result.stdout);
-    expect(report.metadata.vulnerabilities.high).toBe(0);
-    expect(report.metadata.vulnerabilities.critical).toBe(0);
-  }, 40_000);
-
   it("records every bounded release evidence field", () => {
     expect(existsSync(checklistPath), "docs/release-checklist.md is missing").toBe(true);
     const checklist = readFileSync(checklistPath, "utf8");
@@ -371,15 +514,26 @@ describe.sequential("local release candidate acceptance", () => {
       },
       testTotals: {
         baseline: { files: 105, tests: 703 },
-        oss: { files: 23, tests: 393 },
+        oss: { files: 23, packageCiTests: 393, localRcTests: 394 },
         site: { files: 96, passed: 524, skipped: 1 },
       },
       frozenV1: frozenFixtures,
       examples: expectedExamples,
       sitePublisher: {
+        gate: "required-with-HTML_KIT_SITE_WORKTREE",
+        tree: "31b0b196aaa0a107602e0f9a5e3bcf53d456c27f",
         bytes: 16_084,
         sha256: frozenFixtures["tests/compatibility/fixtures/v1/note.html"],
         focusedTests: 14,
+      },
+      productionAudit: {
+        command: "npm audit --omit=dev --json",
+        observedAt: "2026-08-10T18:29:48Z",
+        packageLockSha256:
+          "e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc",
+        high: 0,
+        critical: 0,
+        total: 0,
       },
     });
     expect(evidence.packages).toEqual(expectedPackages);
@@ -389,9 +543,21 @@ describe.sequential("local release candidate acceptance", () => {
         name,
         version,
       })));
-    expect(evidence.testTotals.oss).toEqual(listedTestTotals());
-    expect(readFileSync(join(workspaceRoot, "tests/compatibility/fixtures/v1/note.html")))
-      .toHaveLength(evidence.sitePublisher.bytes);
+    const listed = listedTestTotals();
+    expect({
+      files: evidence.testTotals.oss.files,
+      tests: evidence.testTotals.oss.packageCiTests,
+    }).toEqual(listed);
+    expect(evidence.testTotals.oss.localRcTests).toBe(listed.tests + 1);
+    expect(sha256("package-lock.json")).toBe(evidence.productionAudit.packageLockSha256);
+    expect(Number.isNaN(Date.parse(evidence.productionAudit.observedAt))).toBe(false);
+    for (const workflow of [
+      read(".github/workflows/ci.yml"),
+      read(".github/workflows/release.yml"),
+    ]) {
+      expect(workflow.match(/run: npm audit --omit=dev/gu)).toHaveLength(1);
+    }
+    expect(checklist).not.toMatch(/cached\/offline production audit|npm audit[^`\n]*--offline/iu);
     for (const required of [
       "9527b4fd8c3ff3c49180516440f715a6d1798c8f",
       "59f01074c7daca6de38e30550fea2ca4335d0eff",
