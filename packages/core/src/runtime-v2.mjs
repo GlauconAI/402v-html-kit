@@ -33,6 +33,13 @@ export function renderArtifactRuntimeV2(dataBlockIds = []) {
     dataIds() { return ids.slice(); },
     root: document.querySelector("[data-html-kit-root]"),
   });
+  const binding = Object.getOwnPropertyDescriptor(window, "__htmlKitArtifact");
+  Object.defineProperty(window, "__htmlKitArtifact", {
+    value: binding.value,
+    enumerable: binding.enumerable,
+    writable: false,
+    configurable: false,
+  });
 })();
 </script>`;
 }

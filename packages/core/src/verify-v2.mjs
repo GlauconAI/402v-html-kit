@@ -1,5 +1,6 @@
 import { ArtifactBuildError } from "./errors.mjs";
 import { canonicalizeJson } from "./data-blocks.mjs";
+import { sumUtf8TextBytes } from "./data-accounting-v2.mjs";
 import { findMetaElements } from "./meta.mjs";
 import { ARTIFACT_RESOURCE_LIMITS } from "./resource-limits.mjs";
 import {
@@ -25,6 +26,8 @@ const THEME_ID = /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}|@[A-Za-z0-9][A-Za-z0-9._-
 const THEME_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const LANGUAGE = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/;
 const REQUIRED_CORE_STYLE = ":where(html,body){max-width:100%;overflow-x:clip}:where([data-html-kit-root]){min-width:0;max-width:100%;overflow-wrap:anywhere}:where([data-html-kit-root] svg){max-width:100%;height:auto}";
+const PASSIVE_NAVIGATION_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
+const NETWORK_SIDE_EFFECT_ATTRIBUTES = new Set(["action", "formaction", "ping"]);
 
 function addUniqueMetaValueIssue(issues, document, name, code, label, predicate) {
   const matches = findMetaElements(document, name);
@@ -42,11 +45,12 @@ function verifyLimits(html, document, data, issues) {
   if (data.nodes.length > ARTIFACT_RESOURCE_LIMITS.dataBlocks) {
     issues.push(issue("RESOURCE_LIMIT_EXCEEDED", "Artifact has too many data blocks"));
   }
-  const jsonBytes = data.nodes.reduce(
-    (total, node) => total + Buffer.byteLength(node.textContent ?? "", "utf8"),
-    0,
-  );
-  if (jsonBytes > ARTIFACT_RESOURCE_LIMITS.rawJsonBytes) {
+  try {
+    sumUtf8TextBytes(
+      data.nodes.map((node) => node.textContent ?? ""),
+      { maximumBytes: ARTIFACT_RESOURCE_LIMITS.rawJsonBytes },
+    );
+  } catch {
     issues.push(issue("RESOURCE_LIMIT_EXCEEDED", "Artifact data exceeds the JSON byte limit"));
   }
   const nodeBudget = {
@@ -144,7 +148,7 @@ function verifyScripts(document, dataNodes, mode, issues) {
   }
 }
 
-function verifyDocumentStructure(document, dataNodes, issues) {
+function verifyDocumentStructure(document, dataNodes, mode, issues) {
   const root = document.querySelector("[data-html-kit-root]");
   if (root?.parentElement !== document.body) {
     issues.push(issue("INVALID_DOCUMENT_STRUCTURE", "Artifact root must be a direct body child"));
@@ -157,9 +161,18 @@ function verifyDocumentStructure(document, dataNodes, issues) {
   if (protocolScripts.some((script) => script.parentElement !== document.body)) {
     issues.push(issue("INVALID_DOCUMENT_STRUCTURE", "Artifact protocol scripts must be direct body children"));
   }
-  const allowed = new Set([root, ...protocolScripts]);
-  if ([...document.body.children].some((element) => !allowed.has(element))) {
-    issues.push(issue("INVALID_DOCUMENT_STRUCTURE", "Artifact body contains content outside the owned root"));
+  const runtime = [...document.querySelectorAll("script[data-html-kit-runtime]")];
+  const consumers = [
+    ...document.querySelectorAll("script[data-html-kit-consumer-script]"),
+  ];
+  const expected = [root, ...dataNodes];
+  if (mode === "interactive") expected.push(...runtime, ...consumers);
+  const actual = [...document.body.children];
+  if (
+    actual.length !== expected.length ||
+    actual.some((element, index) => element !== expected[index])
+  ) {
+    issues.push(issue("INVALID_DOCUMENT_STRUCTURE", "Artifact body elements are out of canonical order"));
   }
   if (
     [...document.body.childNodes].some(
@@ -186,6 +199,40 @@ function verifyEventHandlerAttributes(document, issues) {
             "Artifact elements must not contain event-handler attributes",
           ),
         );
+      }
+    }
+  }
+}
+
+function normalizedUrlScheme(value) {
+  const colon = value.indexOf(":");
+  if (colon < 0) return undefined;
+  const candidate = asciiLowercase(value.slice(0, colon)).replace(
+    /[\u0000-\u0020\u007f]/g,
+    "",
+  );
+  return /^[a-z][a-z0-9+.-]*$/.test(candidate) ? candidate : undefined;
+}
+
+function verifyActiveUrls(document, issues) {
+  for (const element of document.querySelectorAll("*")) {
+    if (
+      element.localName.toLowerCase() === "meta" &&
+      asciiLowercase(element.getAttribute("http-equiv") ?? "").trim() === "refresh"
+    ) {
+      issues.push(issue("UNSAFE_URL", "Artifact must not contain meta refresh navigation"));
+    }
+    for (const attribute of element.attributes) {
+      const name = asciiLowercase(attribute.name);
+      if (NETWORK_SIDE_EFFECT_ATTRIBUTES.has(name) || name === "background") {
+        issues.push(issue("UNSAFE_URL", "Artifact contains a network side-effect attribute"));
+        continue;
+      }
+      if (name === "href" || name === "xlink:href") {
+        const scheme = normalizedUrlScheme(attribute.value);
+        if (scheme !== undefined && !PASSIVE_NAVIGATION_SCHEMES.has(scheme)) {
+          issues.push(issue("UNSAFE_URL", "Artifact contains an unsafe navigation URL"));
+        }
       }
     }
   }
@@ -237,6 +284,7 @@ export function verifyArtifactV2Html(html, options = undefined) {
 
     verifyResources(document, issues, mode, { strictOffline: true });
     verifyEventHandlerAttributes(document, issues);
+    verifyActiveUrls(document, issues);
     const data = verifyData(
       document,
       html,
@@ -252,7 +300,7 @@ export function verifyArtifactV2Html(html, options = undefined) {
     );
     verifyLimits(html, document, data, issues);
     verifyScripts(document, data.nodes, mode, issues);
-    verifyDocumentStructure(document, data.nodes, issues);
+    verifyDocumentStructure(document, data.nodes, mode, issues);
     verifySvg(document, issues, { requireFrame: false });
 
     if (document.querySelectorAll("[data-html-kit-root]").length !== 1) {
@@ -273,7 +321,7 @@ export function verifyArtifactV2Html(html, options = undefined) {
           modeMetaName: "html-kit-artifact-mode",
           globalName: "__htmlKitArtifact",
           rootSelector: "[data-html-kit-root]",
-          lockGlobal: false,
+          lockGlobal: true,
         });
       } catch (cause) {
         if (cause instanceof ArtifactBuildError) {

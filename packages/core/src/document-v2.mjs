@@ -3,7 +3,9 @@ import {
   canonicalizeJson,
   computeSourceHash,
   serializeDataBlocks,
+  stableJson,
 } from "./data-blocks.mjs";
+import { sumUtf8TextBytes } from "./data-accounting-v2.mjs";
 import { ArtifactBuildError } from "./errors.mjs";
 import { ARTIFACT_RESOURCE_LIMITS } from "./resource-limits.mjs";
 import { renderArtifactRuntimeV2 } from "./runtime-v2.mjs";
@@ -60,9 +62,10 @@ function normalizeDataBlocks(dataBlocks) {
     normalized.set(id, canonicalizeJson(value, { nodeBudget }));
   }
   const serialized = serializeDataBlocks(normalized);
-  if (Buffer.byteLength(serialized, "utf8") > ARTIFACT_RESOURCE_LIMITS.rawJsonBytes) {
-    fail("RESOURCE_LIMIT_EXCEEDED", "Artifact data blocks exceed the JSON byte limit");
-  }
+  sumUtf8TextBytes(
+    [...normalized.values()].map((value) => `\n${stableJson(value)}\n`),
+    { maximumBytes: ARTIFACT_RESOURCE_LIMITS.rawJsonBytes },
+  );
   return { normalized, serialized };
 }
 

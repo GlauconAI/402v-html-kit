@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   ArtifactBuildError,
   assembleArtifactV2,
+  stableJson,
   verifyArtifactHtml,
 } from "../src/index.mjs";
 
@@ -25,6 +26,19 @@ function expectUnsafeJavaScript(callback: () => unknown) {
     issues: expect.arrayContaining([
       expect.objectContaining({ code: "UNSAFE_JAVASCRIPT" }),
     ]),
+  });
+}
+
+function expectVerificationIssue(callback: () => unknown, code: string) {
+  let caught: unknown;
+  try {
+    callback();
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(ArtifactBuildError);
+  expect((caught as ArtifactBuildError).details).toMatchObject({
+    issues: expect.arrayContaining([expect.objectContaining({ code })]),
   });
 }
 
@@ -100,6 +114,40 @@ describe("artifact contract v2", () => {
     dom.window.close();
   });
 
+  it("locks the runtime protocol binding against consumer replacement", () => {
+    const html = assembleArtifactV2({
+      mode: "interactive",
+      metadata: { title: "Locked", description: "", eyebrow: "", lang: "en" },
+      theme: { id: "example", version: "1.0.0" },
+      themeOutput,
+      dataBlocks: new Map([["registry", { locked: true }]]),
+      consumerScripts: [
+        `const originalRuntime = window.__htmlKitArtifact;
+try { window.__htmlKitArtifact = null; } catch {}
+try { delete window.__htmlKitArtifact; } catch {}
+try { Object.defineProperty(window, "__htmlKitArtifact", { value: null }); } catch {}
+window.runtimeBindingPreserved = window.__htmlKitArtifact === originalRuntime;`,
+      ],
+    });
+    const dom = new JSDOM(html, { runScripts: "dangerously" });
+    const descriptor = Object.getOwnPropertyDescriptor(
+      dom.window,
+      "__htmlKitArtifact",
+    );
+    expect(descriptor).toMatchObject({
+      configurable: false,
+      enumerable: true,
+      writable: false,
+    });
+    expect((dom.window as unknown as { runtimeBindingPreserved: boolean }).runtimeBindingPreserved).toBe(true);
+    expect(descriptor?.value.getData("registry")).toEqual({ locked: true });
+    expect(Reflect.deleteProperty(dom.window, "__htmlKitArtifact")).toBe(false);
+    expect(() =>
+      Object.defineProperty(dom.window, "__htmlKitArtifact", { value: null }),
+    ).toThrow();
+    dom.window.close();
+  });
+
   it("is deterministic and owns neutral metadata", () => {
     const input = {
       mode: "interactive" as const,
@@ -146,6 +194,30 @@ describe("artifact contract v2", () => {
     ];
     for (const candidate of cases) {
       expect(() => verifyArtifactHtml(candidate)).toThrow(ArtifactBuildError);
+    }
+  });
+
+  it("rejects canonical data blocks moved before the owned root", () => {
+    for (const mode of ["note", "interactive"] as const) {
+      const html = assembleArtifactV2({
+        mode,
+        metadata: { title: "Order", description: "", eyebrow: "", lang: "en" },
+        theme: { id: "example", version: "1.0.0" },
+        themeOutput,
+        dataBlocks: new Map([["registry", { ordered: true }]]),
+        consumerScripts: [],
+      });
+      const dataBlock = html.match(
+        /<script type="application\/json" id="registry">[\s\S]*?<\/script>/,
+      )?.[0];
+      expect(dataBlock).toBeTypeOf("string");
+      const moved = html
+        .replace(`${dataBlock}\n`, "")
+        .replace("<div data-html-kit-root>", `${dataBlock}\n<div data-html-kit-root>`);
+      expectVerificationIssue(
+        () => verifyArtifactHtml(moved),
+        "INVALID_DOCUMENT_STRUCTURE",
+      );
     }
   });
 
@@ -237,5 +309,137 @@ describe("artifact contract v2", () => {
       });
       expect(verifyArtifactHtml(html)).toMatchObject({ ok: true, mode });
     }
+  });
+
+  it("rejects active URL and network side-effect attributes during assembly", () => {
+    const hostileBodies = [
+      '<a href="javascript:window.pwned=true">JavaScript</a>',
+      '<a href="vbscript:msgbox(1)">VBScript</a>',
+      '<a href="data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;">Data</a>',
+      '<a href="java\nscript:window.pwned=true">Obfuscated</a>',
+      '<form action="javascript:window.pwned=true"></form>',
+      '<form action="https://example.invalid/submit"></form>',
+      '<button formaction="javascript:window.pwned=true">Submit</button>',
+      '<button formaction="https://example.invalid/submit">Submit</button>',
+      '<input formaction="javascript:window.pwned=true">',
+      '<input formaction="http://example.invalid/submit">',
+      '<a href="#safe" ping="https://example.invalid/audit">Ping</a>',
+      '<meta HTTP-EQUIV="ReFrEsH" content="0;url=https://example.invalid/">',
+      '<meta http-equiv="refresh" content="0;url=javascript:window.pwned=true">',
+      '<table background="https://example.invalid/background.png"></table>',
+    ];
+    for (const mode of ["note", "interactive"] as const) {
+      for (const bodyHtml of hostileBodies) {
+        expectVerificationIssue(
+          () =>
+            assembleArtifactV2({
+              mode,
+              metadata: { title: "URLs", description: "", eyebrow: "", lang: "en" },
+              theme: { id: "example", version: "1.0.0" },
+              themeOutput: { ...themeOutput, bodyHtml },
+              dataBlocks: new Map(),
+              consumerScripts: [],
+            }),
+          "UNSAFE_URL",
+        );
+      }
+    }
+  });
+
+  it("rejects active URL and network side-effect attributes during direct verification", () => {
+    const hostileFragments = [
+      '<a href="javascript:window.pwned=true">JavaScript</a>',
+      '<a href="vbscript:msgbox(1)">VBScript</a>',
+      '<a href="data:text/html,active">Data</a>',
+      '<a href="java\nscript:window.pwned=true">Obfuscated</a>',
+      '<form action="javascript:window.pwned=true"></form>',
+      '<form action="https://example.invalid/submit"></form>',
+      '<button formaction="javascript:window.pwned=true">Submit</button>',
+      '<button formaction="https://example.invalid/submit">Submit</button>',
+      '<input formaction="javascript:window.pwned=true">',
+      '<input formaction="http://example.invalid/submit">',
+      '<a href="#safe" ping="https://example.invalid/audit">Ping</a>',
+      '<meta http-equiv="REFRESH" content="0;url=https://example.invalid/">',
+      '<meta http-equiv="refresh" content="0;url=javascript:window.pwned=true">',
+      '<div background="https://example.invalid/background.png"></div>',
+    ];
+    for (const mode of ["note", "interactive"] as const) {
+      const html = assembleArtifactV2({
+        mode,
+        metadata: { title: "URLs", description: "", eyebrow: "", lang: "en" },
+        theme: { id: "example", version: "1.0.0" },
+        themeOutput,
+        dataBlocks: new Map(),
+        consumerScripts: [],
+      });
+      for (const fragment of hostileFragments) {
+        const candidate = html.replace("Hello</main>", `Hello${fragment}</main>`);
+        expectVerificationIssue(() => verifyArtifactHtml(candidate), "UNSAFE_URL");
+      }
+    }
+  });
+
+  it("preserves passive user-initiated hyperlinks", () => {
+    const links = [
+      "#section",
+      "relative/page.html",
+      "/rooted/page.html",
+      "https://example.invalid/page",
+      "http://example.invalid/page",
+      "mailto:reader@example.invalid",
+      "tel:+15551234567",
+    ];
+    for (const mode of ["note", "interactive"] as const) {
+      const html = assembleArtifactV2({
+        mode,
+        metadata: { title: "Links", description: "", eyebrow: "", lang: "en" },
+        theme: { id: "example", version: "1.0.0" },
+        themeOutput: {
+          ...themeOutput,
+          bodyHtml: `<main>${links.map((href) => `<a href="${href}">Link</a>`).join("")}</main>`,
+        },
+        dataBlocks: new Map(),
+        consumerScripts: [],
+      });
+      expect(verifyArtifactHtml(html)).toMatchObject({ ok: true, mode });
+    }
+  });
+
+  it("counts exact canonical JSON script text bytes at a configurable boundary", async () => {
+    const { sumUtf8TextBytes } = await import("../src/data-accounting-v2.mjs");
+    const boundarySample = ["\n{}\n", '\n"é"\n'];
+    expect(sumUtf8TextBytes(boundarySample, { maximumBytes: 10 })).toBe(10);
+    expect(() =>
+      sumUtf8TextBytes(boundarySample, { maximumBytes: 9 }),
+    ).toThrow(ArtifactBuildError);
+
+    const blocks = new Map<string, unknown>([
+      ["second", { z: true, a: 1 }],
+      ["first", ["é", 2]],
+    ]);
+    const html = assembleArtifactV2({
+      mode: "note",
+      metadata: { title: "Bytes", description: "", eyebrow: "", lang: "en" },
+      theme: { id: "example", version: "1.0.0" },
+      themeOutput,
+      dataBlocks: blocks,
+      consumerScripts: [],
+    });
+    const dom = new JSDOM(html);
+    const actualContents = [
+      ...dom.window.document.querySelectorAll('script[type="application/json"][id]'),
+    ].map((node) => node.textContent ?? "");
+    const canonicalContents = [...blocks.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([, value]) => `\n${stableJson(value)}\n`);
+    expect(sumUtf8TextBytes(actualContents)).toBe(
+      sumUtf8TextBytes(canonicalContents),
+    );
+    expect(verifyArtifactHtml(html)).toMatchObject({
+      ok: true,
+      mode: "note",
+      dataBlockIds: ["first", "second"],
+    });
+    dom.window.close();
   });
 });
