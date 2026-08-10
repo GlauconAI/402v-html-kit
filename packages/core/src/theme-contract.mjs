@@ -468,8 +468,11 @@ function containsForeignDocumentOwnership(bodyHtml) {
     },
     onEndTag(token) {
       if (token.tagName === "svg" || token.tagName === "math") {
-        const index = foreignRoots.lastIndexOf(token.tagName);
-        if (index >= 0) foreignRoots.splice(index, 1);
+        if (foreignRoots.at(-1) !== token.tagName) {
+          unsafe = true;
+        } else {
+          foreignRoots.pop();
+        }
       }
     },
     onComment() {},

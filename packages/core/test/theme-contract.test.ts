@@ -310,6 +310,10 @@ describe("Theme Contract v1", () => {
     ["SVG head", "<svg><head></head></svg>"],
     ["SVG body", "<svg><body></body></svg>"],
     ["mismatched foreign close", "<svg></math><head></head></svg>"],
+    ["crossed SVG/MathML head", "<svg><math></svg></math><head></head>"],
+    ["crossed SVG/MathML body", "<svg><math></svg></math><body>x</body>"],
+    ["crossed SVG/MathML html", "<svg><math></svg></math><html></html>"],
+    ["crossed MathML/SVG head", "<math><svg></math></svg><head></head>"],
   ])("rejects namespace-independent ownership element: %s", (_label, bodyHtml) => {
     expectCode(
       () => renderThemeV1(theme(() => ({ ...safeResult, bodyHtml })), input()),
