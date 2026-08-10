@@ -88,10 +88,10 @@ function isDeeplyFrozen(value: unknown, seen = new Set<unknown>()): boolean {
 }
 
 describe("buildNote", () => {
-  it("is the sole addition to the twelve-export public core surface", () => {
+  it("keeps the public core surface bounded to fourteen exports", () => {
     expect("buildNote" in core).toBe(true);
     expect(buildNote).toBeTypeOf("function");
-    expect(Object.keys(core)).toHaveLength(12);
+    expect(Object.keys(core)).toHaveLength(14);
   });
 
   it.each([

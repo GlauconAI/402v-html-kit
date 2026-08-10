@@ -5,6 +5,57 @@ import { failVerification, issue } from "./verify-common.mjs";
 import { verifyArtifactV1Html } from "./verify-v1.mjs";
 import { verifyArtifactV2Html } from "./verify-v2.mjs";
 
+const VERIFY_FILE_KEYS = new Set([
+  "path",
+  "requiredDataBlocks",
+  "startupTimeoutMs",
+]);
+
+function invalidVerificationOptions(message) {
+  throw new ArtifactBuildError(
+    "ARTIFACT_VERIFICATION_FAILED",
+    "Artifact verification received invalid options",
+    { issues: [{ code: "INVALID_VERIFICATION_OPTIONS", message }] },
+  );
+}
+
+function inspectVerifyFileOptions(options) {
+  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+    invalidVerificationOptions("Verification options must be a plain object");
+  }
+  let descriptors;
+  let keys;
+  let prototype;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(options);
+    keys = Reflect.ownKeys(options);
+    prototype = Object.getPrototypeOf(options);
+  } catch {
+    invalidVerificationOptions("Verification options cannot be inspected safely");
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    invalidVerificationOptions("Verification options must be a plain object");
+  }
+  const values = Object.create(null);
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (
+      typeof key !== "string" ||
+      !VERIFY_FILE_KEYS.has(key) ||
+      descriptor === undefined ||
+      descriptor.enumerable !== true ||
+      !Object.prototype.hasOwnProperty.call(descriptor, "value")
+    ) {
+      invalidVerificationOptions("Verification options contain an invalid property");
+    }
+    values[key] = descriptor.value;
+  }
+  if (typeof values.path !== "string" || values.path.length === 0) {
+    invalidVerificationOptions("Verification requires one non-empty path");
+  }
+  return values;
+}
+
 export function verifyArtifactHtml(html, options = undefined) {
   if (typeof html !== "string") {
     failVerification([issue("INVALID_HTML_INPUT", "Artifact HTML must be a string")]);
@@ -37,4 +88,12 @@ export function verifyArtifactFile(path, options = undefined) {
     throw cause;
   }
   return verifyArtifactHtml(loaded.content, options);
+}
+
+export function verifyArtifact(options) {
+  const inspected = inspectVerifyFileOptions(options);
+  return verifyArtifactFile(inspected.path, {
+    requiredDataBlocks: inspected.requiredDataBlocks,
+    startupTimeoutMs: inspected.startupTimeoutMs,
+  });
 }

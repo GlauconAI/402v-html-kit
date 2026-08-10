@@ -55,6 +55,31 @@ export declare function buildNote(
   options: BuildNoteOptions,
 ): Promise<NoteBuildResult>;
 
+export interface BuildInteractiveArtifactOptions {
+  manifestPath: string;
+  outputPath: string;
+  force?: boolean;
+  theme: import("./theme-contract.mjs").ArtifactThemeV1;
+  verifyDeterminism?: boolean;
+}
+
+export interface InteractiveBuildResult {
+  ok: true;
+  contractVersion: 2;
+  mode: "interactive";
+  output: string;
+  title: string;
+  bytes: number;
+  sourceHash: string;
+  outputHash: string;
+  dataBlockIds: string[];
+  theme: Readonly<ArtifactV2ThemeIdentity>;
+}
+
+export declare function buildInteractiveArtifact(
+  options: BuildInteractiveArtifactOptions,
+): Promise<InteractiveBuildResult>;
+
 export type {
   ArtifactContract,
   ArtifactVerificationResult,
@@ -77,4 +102,12 @@ import type {
 export declare function verifyArtifactHtml(
   html: string,
   options?: VerifyArtifactHtmlOptions,
+): ArtifactVerificationResult;
+
+export interface VerifyArtifactOptions extends VerifyArtifactHtmlOptions {
+  path: string;
+}
+
+export declare function verifyArtifact(
+  options: VerifyArtifactOptions,
 ): ArtifactVerificationResult;
