@@ -140,6 +140,9 @@ only when the registry integrity and SLSA v1 provenance match the local
 tarball. npm verifies the Sigstore attestation bundle; the workflow then binds
 its subject digest, repository, workflow path, tag ref, and commit to the
 verified release source. Any mismatch or missing provenance fails closed.
+The release verifier pins `sigstore@4.1.1` (Apache-2.0) as a root development
+dependency. It is not included in any published package or production license
+inventory; the production audit gate remains `npm audit --omit=dev`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the
 [changelog](CHANGELOG.md). The code is licensed under the [MIT License](LICENSE).

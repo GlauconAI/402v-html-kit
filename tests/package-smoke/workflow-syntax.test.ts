@@ -145,6 +145,9 @@ describe("GitHub workflow contracts", () => {
     }
     const helperSource = readFileSync(new URL("../../.github/scripts/release.mjs", import.meta.url), "utf8");
     expect(helperSource).toMatch(/npm[\s\S]*audit[\s\S]*signatures[\s\S]*--json[\s\S]*--include-attestations/u);
+    expect(helperSource).toMatch(/spawnSync\("npm",\s*\["view"[\s\S]*timeout:\s*30_000[\s\S]*maxBuffer/u);
+    expect(helperSource).toMatch(/\["pack"[\s\S]*timeout:\s*120_000[\s\S]*maxBuffer/u);
+    expect(helperSource).toMatch(/\["publish"[\s\S]*stdio:\s*"inherit"[\s\S]*timeout:\s*120_000/u);
 
     const commands = (publish.steps as Record<string, string>[])
       .map((step) => step.run ?? "")

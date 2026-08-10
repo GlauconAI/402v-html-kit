@@ -170,6 +170,7 @@ describe("public documentation contract", () => {
     expect(releaseGovernance).toMatch(/tag creat(?:ion|ors?)[\s\S]*(?:release maintainer|bypass actor)/iu);
     expect(releaseGovernance).toMatch(/resum/iu);
     expect(releaseGovernance).toMatch(/integrity[\s\S]*provenance[\s\S]*fail(?:s|ed)? closed/iu);
+    expect(releaseGovernance).toMatch(/sigstore(?:@|\s+)4\.1\.1[\s\S]*Apache-2\.0[\s\S]*dev(?:elopment)? dependency/iu);
     expect(read("CHANGELOG.md")).toContain("## [0.1.0]");
     const pullRequest = read(".github/PULL_REQUEST_TEMPLATE.md");
     for (const requirement of [

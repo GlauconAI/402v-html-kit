@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import sigstore from "sigstore";
 
 const SEMVER_NUMBER = "(?:0|[1-9][0-9]*)";
 const EXACT_TAG = new RegExp(`^v(${SEMVER_NUMBER}\\.${SEMVER_NUMBER}\\.${SEMVER_NUMBER})$`, "u");
@@ -11,6 +12,24 @@ const PROVENANCE_PREDICATE = "https://slsa.dev/provenance/v1";
 const INTOTO_STATEMENT = "https://in-toto.io/Statement/v1";
 const GITHUB_BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1";
 const RELEASE_WORKFLOW = ".github/workflows/release.yml";
+const GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com";
+const RETRYABLE_ATTESTATION_CODES = new Set([
+  "ATTESTATION_NOT_AVAILABLE",
+  "E404",
+  "E429",
+  "E500",
+  "E502",
+  "E503",
+  "E504",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "TUF_DOWNLOAD_TARGET_ERROR",
+  "TUF_FIND_TARGET_ERROR",
+  "TUF_REFRESH_METADATA_ERROR",
+]);
 const PACKAGES = [
   { name: "@402v/html-kit-core", workspace: "packages/core" },
   { name: "@402v/theme-402v", workspace: "packages/theme-402v" },
@@ -117,16 +136,63 @@ function validateSourceIdentity(source) {
   return source;
 }
 
+function exactPattern(value) {
+  return new RegExp(`^${value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "u");
+}
+
+export function certificateIdentityPolicy(source) {
+  for (const field of ["repository", "workflow", "ref"]) {
+    invariant(typeof source?.[field] === "string" && source[field] !== "", `Certificate source ${field} is required`);
+  }
+  const identityURI = `${source.repository}/${source.workflow}@${source.ref}`;
+  return {
+    identityURI,
+    identityPattern: exactPattern(identityURI),
+    issuer: GITHUB_OIDC_ISSUER,
+  };
+}
+
+export async function verifyBundleCertificate({
+  bundle,
+  source,
+  certificateIssuer = GITHUB_OIDC_ISSUER,
+  tufCachePath,
+}) {
+  const policy = certificateIdentityPolicy(source);
+  await sigstore.verify(bundle, {
+    certificateIdentityURI: policy.identityPattern,
+    certificateIssuer,
+    tufCachePath,
+    tufForceCache: true,
+    retry: { retries: 2 },
+    timeout: 10_000,
+  });
+}
+
+function attestationUnavailable(message) {
+  return Object.assign(new Error(message), { code: "ATTESTATION_NOT_AVAILABLE" });
+}
+
+export function isRetryableAttestationError(error) {
+  return RETRYABLE_ATTESTATION_CODES.has(error?.code);
+}
+
 export function validateVerifiedAttestation({ artifact, audit, source }) {
   validateSourceIdentity(source);
   invariant(Array.isArray(audit?.invalid) && audit.invalid.length === 0, "npm reported an invalid package signature or attestation");
-  invariant(Array.isArray(audit?.missing) && audit.missing.length === 0, "npm reported a missing package signature or attestation");
+  if (!Array.isArray(audit?.missing) || audit.missing.length !== 0) {
+    throw attestationUnavailable("npm reported a missing package signature or attestation");
+  }
   invariant(Array.isArray(audit?.verified), "npm did not return verified attestations");
   const verified = audit.verified.filter((entry) => entry.name === artifact.name && entry.version === artifact.version);
-  invariant(verified.length === 1, `npm did not return exactly one verified entry for ${artifact.name}@${artifact.version}`);
+  if (verified.length !== 1) {
+    throw attestationUnavailable(`npm did not return exactly one verified entry for ${artifact.name}@${artifact.version}`);
+  }
   const provenances = (verified[0].attestationBundles ?? [])
     .filter((entry) => entry.predicateType === PROVENANCE_PREDICATE);
-  invariant(provenances.length === 1, `${artifact.name}@${artifact.version} must have exactly one npm-verified SLSA v1 provenance bundle`);
+  if (provenances.length !== 1) {
+    throw attestationUnavailable(`${artifact.name}@${artifact.version} must have exactly one npm-verified SLSA v1 provenance bundle`);
+  }
 
   const payload = provenances[0].bundle?.dsseEnvelope?.payload;
   invariant(typeof payload === "string" && payload !== "", "Verified provenance bundle has no DSSE payload");
@@ -152,25 +218,59 @@ export function validateVerifiedAttestation({ artifact, audit, source }) {
   const dependency = build.resolvedDependencies[0];
   invariant(dependency?.uri === `git+${source.repository}@${source.ref}`, "Verified provenance source repository/ref does not match the verified release source");
   invariant(dependency?.digest?.gitCommit === source.commit, "Verified provenance commit does not match the verified release commit");
-  return statement;
+  return { statement, bundle: provenances[0].bundle };
+}
+
+function externalCommandError(error, context) {
+  const details = [error?.message, error?.stderr?.toString?.(), error?.stdout?.toString?.()]
+    .filter((value) => typeof value === "string")
+    .join("\n");
+  const code = [...RETRYABLE_ATTESTATION_CODES]
+    .find((candidate) => error?.code === candidate || details.includes(candidate));
+  if (!code) return error;
+  return Object.assign(new Error(`${context}: ${details.trim() || code}`, { cause: error }), { code });
 }
 
 async function verifyNpmAttestation(artifact, source) {
   const temporaryRoot = mkdtempSync(join(tmpdir(), "402v-release-attestation-"));
-  const npmEnvironment = { ...process.env, NO_UPDATE_NOTIFIER: "1" };
+  const npmCache = join(temporaryRoot, "npm-cache");
+  const npmEnvironment = {
+    ...process.env,
+    NO_UPDATE_NOTIFIER: "1",
+    npm_config_cache: npmCache,
+  };
   try {
     writeFileSync(join(temporaryRoot, "package.json"), `${JSON.stringify({ private: true }, null, 2)}\n`, "utf8");
-    execFileSync(
-      "npm",
-      ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact", "--loglevel=error", `${artifact.name}@${artifact.version}`],
-      { cwd: temporaryRoot, env: npmEnvironment, stdio: "ignore", timeout: 120_000 },
-    );
-    const output = execFileSync(
-      "npm",
-      ["audit", "signatures", "--json", "--include-attestations", "--omit=dev", "--ignore-scripts", "--loglevel=error"],
-      { cwd: temporaryRoot, encoding: "utf8", env: npmEnvironment, maxBuffer: 16 * 1024 * 1024, timeout: 120_000 },
-    );
-    return validateVerifiedAttestation({ artifact, audit: JSON.parse(output), source });
+    try {
+      execFileSync(
+        "npm",
+        ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact", "--loglevel=error", `${artifact.name}@${artifact.version}`],
+        { cwd: temporaryRoot, env: npmEnvironment, maxBuffer: 4 * 1024 * 1024, timeout: 120_000 },
+      );
+    } catch (error) {
+      throw externalCommandError(error, `npm install failed for ${artifact.name}@${artifact.version}`);
+    }
+    let output;
+    try {
+      output = execFileSync(
+        "npm",
+        ["audit", "signatures", "--json", "--include-attestations", "--omit=dev", "--ignore-scripts", "--loglevel=error"],
+        { cwd: temporaryRoot, encoding: "utf8", env: npmEnvironment, maxBuffer: 16 * 1024 * 1024, timeout: 120_000 },
+      );
+    } catch (error) {
+      throw externalCommandError(error, `npm attestation audit failed for ${artifact.name}@${artifact.version}`);
+    }
+    const verified = validateVerifiedAttestation({ artifact, audit: JSON.parse(output), source });
+    try {
+      await verifyBundleCertificate({
+        bundle: verified.bundle,
+        source,
+        tufCachePath: join(npmCache, "_tuf"),
+      });
+    } catch (error) {
+      throw externalCommandError(error, `Fulcio identity verification failed for ${artifact.name}@${artifact.version}`);
+    }
+    return verified.statement;
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -190,15 +290,28 @@ export async function publishResumably({ artifacts, source, lookup, publish, ver
 
     await publish(artifact.path);
     let latest = null;
+    let lastPropagationError = attestationUnavailable(`${artifact.name}@${artifact.version} provenance has not propagated`);
+    let verified = false;
     for (let attempt = 0; attempt < maxPolls; attempt += 1) {
-      latest = await lookup(artifact.name, artifact.version);
-      if (verifyRegistryDist(artifact, latest, { allowPending: true })) break;
+      try {
+        latest = await lookup(artifact.name, artifact.version);
+        if (!verifyRegistryDist(artifact, latest, { allowPending: true })) {
+          throw attestationUnavailable(`${artifact.name}@${artifact.version} provenance has not propagated`);
+        }
+        await verifyAttestation(artifact, source);
+        verified = true;
+        break;
+      } catch (error) {
+        if (!isRetryableAttestationError(error)) throw error;
+        lastPropagationError = error;
+      }
       if (attempt + 1 < maxPolls) await sleep();
     }
-    if (!verifyRegistryDist(artifact, latest, { allowPending: true })) {
-      throw new Error(`${artifact.name}@${artifact.version} did not expose matching integrity and SLSA v1 provenance within the bounded poll window`);
+    if (!verified) {
+      throw new Error(`${artifact.name}@${artifact.version} did not expose a verifiable matching SLSA v1 provenance within the bounded poll window`, {
+        cause: lastPropagationError,
+      });
     }
-    await verifyAttestation(artifact, source);
   }
 }
 
@@ -265,7 +378,12 @@ async function prepareCommand() {
     const output = execFileSync(
       "npm",
       ["pack", "--json", "--ignore-scripts", "--workspace", item.name, "--pack-destination", destination, "--loglevel=error"],
-      { encoding: "utf8", env: { ...process.env, NO_UPDATE_NOTIFIER: "1" } },
+      {
+        encoding: "utf8",
+        env: { ...process.env, NO_UPDATE_NOTIFIER: "1" },
+        timeout: 120_000,
+        maxBuffer: 16 * 1024 * 1024,
+      },
     );
     const records = JSON.parse(output);
     invariant(Array.isArray(records) && records.length === 1, `npm pack returned an unexpected result for ${item.name}`);
@@ -289,10 +407,16 @@ function npmView(name, version) {
   const result = spawnSync("npm", ["view", `${name}@${version}`, "dist", "--json", "--loglevel=error"], {
     encoding: "utf8",
     env: { ...process.env, NO_UPDATE_NOTIFIER: "1" },
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
   });
+  if (result.error) throw externalCommandError(result.error, `npm view failed for ${name}@${version}`);
   if (result.status === 0) return JSON.parse(result.stdout);
   if (/E404|404 Not Found|is not in this registry/iu.test(result.stderr)) return null;
-  throw new Error(`npm view failed for ${name}@${version}: ${result.stderr.trim() || `exit ${result.status}`}`);
+  throw externalCommandError(
+    Object.assign(new Error(result.stderr.trim() || `exit ${result.status}`), { stderr: result.stderr }),
+    `npm view failed for ${name}@${version}`,
+  );
 }
 
 async function publishCommand() {
@@ -308,6 +432,7 @@ async function publishCommand() {
       execFileSync("npm", ["publish", path, "--access", "public", "--provenance"], {
         stdio: "inherit",
         env: { ...process.env, NO_UPDATE_NOTIFIER: "1" },
+        timeout: 120_000,
       });
     },
     verifyAttestation: verifyNpmAttestation,

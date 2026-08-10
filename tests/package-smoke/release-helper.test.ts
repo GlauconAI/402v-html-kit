@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 const helperUrl = new URL("../../.github/scripts/release.mjs", import.meta.url);
@@ -127,7 +129,98 @@ function npmAuditResult(
   };
 }
 
+const publicCertificateSource = {
+  repository: "https://github.com/npm/package-json",
+  workflow: ".github/workflows/release-integration.yml",
+  ref: "refs/heads/main",
+};
+const githubOidcIssuer = "https://token.actions.githubusercontent.com";
+
+function realProvenanceBundle(): Record<string, unknown> {
+  return JSON.parse(readFileSync(
+    new URL("./fixtures/npmcli-package-json-7.0.4-provenance-bundle.json", import.meta.url),
+    "utf8",
+  ));
+}
+
+function createOfflineTufCache(): string {
+  const root = mkdtempSync(join(tmpdir(), "402v-sigstore-tuf-test-"));
+  const repository = join(root, "tuf-repo-cdn.sigstore.dev");
+  mkdirSync(join(repository, "targets"), { recursive: true });
+  const metadata = JSON.parse(readFileSync(
+    new URL("./fixtures/sigstore-tuf-metadata.json", import.meta.url),
+    "utf8",
+  ));
+  for (const name of ["root", "timestamp", "snapshot", "targets"]) {
+    writeFileSync(join(repository, `${name}.json`), JSON.stringify(metadata[name]), "utf8");
+  }
+  const trustedRoot = readFileSync(new URL("./fixtures/sigstore-trusted-root.json", import.meta.url));
+  const trustedRootHash = metadata.targets.signed.targets["trusted_root.json"].hashes.sha256;
+  for (const targetName of ["trusted_root.json", `${trustedRootHash}.trusted_root.json`]) {
+    writeFileSync(join(repository, "targets", targetName), trustedRoot);
+  }
+  return root;
+}
+
 describe("trusted release helper", () => {
+  it("pins the npm-compatible official sigstore verifier as a direct dev dependency", () => {
+    const manifest = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+    expect(manifest.devDependencies.sigstore).toBe("4.1.1");
+    const installed = JSON.parse(readFileSync(new URL("../../node_modules/sigstore/package.json", import.meta.url), "utf8"));
+    expect(installed.version).toBe("4.1.1");
+    expect(installed.license).toBe("Apache-2.0");
+  });
+
+  it("builds one escaped and anchored Fulcio identity URI from the verified source", async () => {
+    const { certificateIdentityPolicy } = await helper();
+    const policy = certificateIdentityPolicy(sourceIdentity());
+    const expected = "https://github.com/owner/repo/.github/workflows/release.yml@refs/tags/v1.2.3";
+    expect(policy.identityURI).toBe(expected);
+    expect(policy.identityPattern).toBeInstanceOf(RegExp);
+    expect(policy.identityPattern.test(expected)).toBe(true);
+    expect(policy.identityPattern.test(`${expected}-attacker`)).toBe(false);
+    expect(policy.identityPattern.test(expected.replace("github.com", "githubXcom"))).toBe(false);
+    expect(policy.issuer).toBe(githubOidcIssuer);
+  });
+
+  it.each([
+    ["expected SAN and issuer", publicCertificateSource, githubOidcIssuer, false],
+    ["wrong workflow SAN", { ...publicCertificateSource, workflow: ".github/workflows/other.yml" }, githubOidcIssuer, true],
+    ["wrong repository SAN", { ...publicCertificateSource, repository: "https://github.com/attacker/package-json" }, githubOidcIssuer, true],
+    ["wrong issuer", publicCertificateSource, "https://issuer.example", true],
+  ])("uses real sigstore verification for %s", async (_label, source, issuer, rejects) => {
+    const { verifyBundleCertificate } = await helper();
+    const tufCachePath = createOfflineTufCache();
+    try {
+      const verification = verifyBundleCertificate({
+        bundle: realProvenanceBundle(),
+        source,
+        certificateIssuer: issuer,
+        tufCachePath,
+      });
+      if (rejects) await expect(verification).rejects.toThrow();
+      else await expect(verification).resolves.toBeUndefined();
+    } finally {
+      rmSync(tufCachePath, { recursive: true, force: true });
+    }
+  });
+
+  it("fails real sigstore verification when certificate material is missing", async () => {
+    const { verifyBundleCertificate } = await helper();
+    const bundle: any = structuredClone(realProvenanceBundle());
+    delete bundle.verificationMaterial.certificate;
+    const tufCachePath = createOfflineTufCache();
+    try {
+      await expect(verifyBundleCertificate({
+        bundle,
+        source: publicCertificateSource,
+        tufCachePath,
+      })).rejects.toThrow();
+    } finally {
+      rmSync(tufCachePath, { recursive: true, force: true });
+    }
+  });
+
   it("accepts only a verified annotated exact SemVer tag bound to event ref, SHA, and HEAD", async () => {
     const { verifyTagIdentity } = await helper();
     const fetchJson = vi
@@ -246,7 +339,7 @@ describe("trusted release helper", () => {
       artifact,
       audit: npmAuditResult(artifact),
       source: sourceIdentity(),
-    })).toEqual(provenanceStatement(artifact));
+    }).statement).toEqual(provenanceStatement(artifact));
   });
 
   it("rejects npm audit results with invalid, missing, or absent verified attestations", async () => {
@@ -336,5 +429,69 @@ describe("trusted release helper", () => {
       }),
     ).rejects.toThrow(/provenance/u);
     expect(lookup).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    "ATTESTATION_NOT_AVAILABLE",
+    "E404",
+    "EAI_AGAIN",
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "TUF_DOWNLOAD_TARGET_ERROR",
+    "TUF_REFRESH_METADATA_ERROR",
+    "TUF_FIND_TARGET_ERROR",
+  ])("classifies only explicit propagation error %s as retryable", async (code) => {
+    const { isRetryableAttestationError } = await helper();
+    expect(isRetryableAttestationError(Object.assign(new Error(code), { code }))).toBe(true);
+  });
+
+  it.each(["UNTRUSTED_SIGNER_ERROR", "SIGNATURE_ERROR", "TLOG_ERROR", "EATTESTATIONVERIFY"])(
+    "classifies permanent identity/digest/schema/crypto error %s as non-retryable",
+    async (code) => {
+      const { isRetryableAttestationError } = await helper();
+      expect(isRetryableAttestationError(Object.assign(new Error(code), { code }))).toBe(false);
+    },
+  );
+
+  it("retries post-publish attestation propagation failures within the bounded poll", async () => {
+    const { publishResumably } = await helper();
+    const artifact = artifactFixture()[0];
+    const verifyAttestation = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("not propagated"), { code: "ATTESTATION_NOT_AVAILABLE" }))
+      .mockRejectedValueOnce(Object.assign(new Error("tuf unavailable"), { code: "TUF_REFRESH_METADATA_ERROR" }))
+      .mockResolvedValue(undefined);
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(publishResumably({
+      artifacts: [artifact],
+      source: sourceIdentity(),
+      lookup: vi.fn().mockResolvedValueOnce(null).mockResolvedValue(registryDist(artifact)),
+      publish: vi.fn().mockResolvedValue(undefined),
+      verifyAttestation,
+      sleep,
+      maxPolls: 3,
+    })).resolves.toBeUndefined();
+    expect(verifyAttestation).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a post-publish identity or cryptographic mismatch", async () => {
+    const { publishResumably } = await helper();
+    const artifact = artifactFixture()[0];
+    const verifyAttestation = vi.fn().mockRejectedValue(
+      Object.assign(new Error("wrong signer"), { code: "UNTRUSTED_SIGNER_ERROR" }),
+    );
+    const sleep = vi.fn();
+    await expect(publishResumably({
+      artifacts: [artifact],
+      source: sourceIdentity(),
+      lookup: vi.fn().mockResolvedValueOnce(null).mockResolvedValue(registryDist(artifact)),
+      publish: vi.fn().mockResolvedValue(undefined),
+      verifyAttestation,
+      sleep,
+      maxPolls: 3,
+    })).rejects.toThrow(/wrong signer/u);
+    expect(verifyAttestation).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 });

@@ -71,7 +71,7 @@ shell). All other private-infrastructure identifiers remain forbidden.
 | is-potential-custom-element-name | 1.0.1 | MIT |
 | jsdom | 29.1.1 | MIT |
 | longest-streak | 3.1.0 | MIT |
-| lru-cache | 11.3.6 | BlueOak-1.0.0 |
+| lru-cache | 11.5.2 | BlueOak-1.0.0 |
 | markdown-table | 3.0.4 | MIT |
 | mdast-util-find-and-replace | 3.0.2 | MIT |
 | mdast-util-from-markdown | 2.0.3 | MIT |

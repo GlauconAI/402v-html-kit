@@ -52,6 +52,9 @@ core, theme, then CLI order. Existing registry releases are accepted only when
 npm verifies their Sigstore bundle and its subject integrity, source repository,
 workflow, tag ref, and commit match the verified release. Any mismatch, missing
 provenance, or verification failure fails closed.
+The root-only release verifier uses the exact `sigstore@4.1.1` Apache-2.0
+development dependency. It does not alter the published production dependency
+or license surface.
 Publishing or deploying a downstream website is separate work and requires
 separate authorization.
 
