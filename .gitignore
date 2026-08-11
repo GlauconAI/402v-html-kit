@@ -3,4 +3,12 @@ node_modules/
 coverage/
 *.tgz
 examples/**/output.html
-
+.DS_Store
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+.npm/
+.cache/
+*.log
