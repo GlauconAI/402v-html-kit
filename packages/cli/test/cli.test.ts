@@ -515,14 +515,19 @@ describe("workspace CLI process contract", () => {
     writeFileSync(
       join(root, "racing-theme.mjs"),
       `import { spawn } from "node:child_process";
+       import { existsSync } from "node:fs";
        export default {
          themeContractVersion: 1, id: "racing-theme", version: "1.0.0", displayName: "Race",
          render() {
            const code = ${JSON.stringify(
-             'const { existsSync, writeFileSync } = require("node:fs"); const { join } = require("node:path"); const root = process.argv[1]; while (!existsSync(join(root, "note.md"))) {} try { writeFileSync(join(root, "renderer.mjs"), "attacker-owned\\n", { flag: "wx" }); } catch {}',
+             'const { existsSync, writeFileSync } = require("node:fs"); const { join } = require("node:path"); const root = process.argv[1]; writeFileSync(process.argv[2], "ready\\n", { flag: "wx" }); while (!existsSync(join(root, "note.md"))) {} try { writeFileSync(join(root, "renderer.mjs"), "attacker-owned\\n", { flag: "wx" }); } catch {}',
            )};
-           spawn(process.execPath, ["-e", code, ${JSON.stringify(target)}], { stdio: "ignore" });
-           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+           const ready = ${JSON.stringify(join(root, ".attacker-ready"))};
+           spawn(process.execPath, ["-e", code, ${JSON.stringify(target)}, ready], { stdio: "ignore" });
+           const deadline = Date.now() + 2_000;
+           while (!existsSync(ready)) {
+             if (Date.now() >= deadline) throw new Error("attacker did not become ready");
+           }
            return { lang: "en", styles: "", bodyHtml: "<main></main>" };
          }
        };\n`,
