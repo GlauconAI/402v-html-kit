@@ -78,6 +78,8 @@ describe("public documentation contract", () => {
     expect(readme).toMatch(/trusted local build-time code[\s\S]*not sandboxed/iu);
     expect(readme).toMatch(/self-contained[\s\S]*offline/iu);
     expect(readme).toMatch(/remote Markdown\s+images[\s\S]*passive links/iu);
+    expect(readme).toMatch(/Consumer JavaScript[\s\S]*not a sandboxed capability/iu);
+    expect(readme).toMatch(/does not claim to prevent[\s\S]*network/iu);
     expect(readme).toMatch(/contract-v1 note verification[\s\S]*remote image compatibility/iu);
     expect(readme).toContain("docs/migration-from-internal-v1.md");
     expect(readme).toMatch(/Publishing[\s\S]*outside (?:this project|the project)/iu);
@@ -155,6 +157,7 @@ describe("public documentation contract", () => {
       expect(security).toContain(value);
     }
     expect(security).toMatch(/ArtifactBuildError[\s\S]*code[\s\S]*message[\s\S]*details/u);
+    expect(security).toMatch(/not a capability sandbox[\s\S]*network-silence guarantee/iu);
   });
 
   it("defines governance, disclosure, release ownership, and MIT terms", () => {

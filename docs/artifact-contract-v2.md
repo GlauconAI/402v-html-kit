@@ -54,8 +54,14 @@ it into an ordinary passive hyperlink; it does not emit a remote `<img>`.
 
 Passive `http`, `https`, `mailto`, `tel`, fragment, and relative navigation
 links are allowed when they do not have network side-effect attributes. The
-artifact therefore opens and runs without network access, although a user can
-choose to follow a link.
+artifact therefore opens and can be verified without network access; interactive
+behavior that uses only embedded data runs offline. A user can choose to follow
+a link.
+
+Consumer JavaScript is trusted local code and is not capability-sandboxed. It
+can intentionally invoke browser networking or navigation APIs after startup.
+Verification rejects active external HTML/CSS resources but does not claim to
+prevent arbitrary trusted JavaScript from initiating network activity.
 
 The verifier checks canonical JSON, source hash, ordering, one root, strict
 UTF-8 file input, bounded resources, accessible and contained SVG, classic

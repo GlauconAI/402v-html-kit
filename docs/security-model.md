@@ -16,6 +16,9 @@ Final HTML validation rejects external active resources, unsafe CSS and
 JavaScript, event attributes, protocol shadowing, inaccessible or external SVG,
 noncanonical data, invalid ordering, source-hash mismatch, overflow hazards,
 and failed interactive startup. Passive navigation links remain possible.
+Trusted consumer JavaScript can intentionally use browser networking or
+navigation APIs after startup. Verification is not a capability sandbox and
+does not provide a network-silence guarantee for arbitrary trusted code.
 
 ## Public artifact limits
 

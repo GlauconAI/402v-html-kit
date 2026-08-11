@@ -9,7 +9,8 @@
 
 402v HTML Kit 可以把 Markdown 和结构化 JSON 编译成确定性、可自包含的
 HTML 成品。最终结果只有一个可携带文件：阅读者不需要服务器，构建完成后
-不依赖 Node.js 或 npm，经过 contract-v2 验证的成品不会发起意外网络请求。
+不需要安装 Node.js、npm 或外部 runtime；经过 contract-v2 验证的成品不包含
+活动的外部资源依赖。
 
 它适合长期笔记、AI Agent 报告、交互式数据简报、项目归档，以及任何希望
 在构建环境消失后依然能够阅读和验证的交付物。
@@ -79,16 +80,18 @@ description: 一份可以长期离线阅读的记录。
 成品会包含自己的视觉样式与本地图片。
 ```
 
-执行构建与验证：
+上面的片段展示输入格式；仓库已经提供可直接运行的
+`examples/note/input.md`。执行构建与验证：
 
 ```sh
-npm exec -- 402v-html-kit build notes/field-notes.md \
-  --output notes/field-notes.html
+npm exec -- 402v-html-kit build examples/note/input.md \
+  --output examples/note/output.html --force
 
-npm exec -- 402v-html-kit verify notes/field-notes.html
+npm exec -- 402v-html-kit verify examples/note/output.html
 ```
 
-成功结果是机器可读的：
+成功结果是机器可读的（下方为简写，实际结果还包含 `command` 与
+`sourceHash`）：
 
 ```json
 {"ok":true,"contractVersion":2,"mode":"note","dataBlockIds":[],"issues":[]}
@@ -100,7 +103,9 @@ note 成品不包含 runtime 或 consumer script，可以直接通过浏览器�
 ### 构建交互式成品
 
 interactive mode 使用受信任的本地 manifest、具名 JSON 数据块和本地
-renderer。一个最小 manifest 如下：
+renderer。下面的最小 manifest 与仓库中的
+`examples/interactive/artifact.mjs` 结构一致；同目录已包含
+`data.json` 与 `renderer.mjs`：
 
 ```js
 export default {
@@ -138,13 +143,14 @@ export function renderArtifact({ data }) {
 }
 ```
 
-需要精确字节确定性时，可用同一输入构建两次；之后验证全部必需数据块：
+builder 默认会在内部渲染两次，并在字节不一致时拒绝输出。因此只需一次构建
+命令即可执行精确字节确定性检查；之后再验证全部必需数据块：
 
 ```sh
-npm exec -- 402v-html-kit build-artifact reports/artifact.mjs \
-  --output reports/project-brief.html
+npm exec -- 402v-html-kit build-artifact examples/interactive/artifact.mjs \
+  --output examples/interactive/output.html --force
 
-npm exec -- 402v-html-kit verify reports/project-brief.html \
+npm exec -- 402v-html-kit verify examples/interactive/output.html \
   --required-block dashboard
 ```
 
@@ -158,10 +164,12 @@ const ids = window.__htmlKitArtifact.dataIds();
 无需手工修改 HTML，就能按稳定 block ID 更新数据：
 
 ```sh
-npm exec -- 402v-html-kit update-data reports/project-brief.html \
-  --manifest reports/artifact.mjs \
+cp examples/interactive/data.json /tmp/402v-data.next.json
+
+npm exec -- 402v-html-kit update-data examples/interactive/output.html \
+  --manifest examples/interactive/artifact.mjs \
   --id dashboard \
-  --input reports/data.next.json \
+  --input /tmp/402v-data.next.json \
   --force
 ```
 
@@ -249,10 +257,15 @@ parser 目前接受 `--preserve-data-from`，但命令会以
   外部 SVG 引用和 CSS 外部依赖；
 - 检查 canonical JSON、source hash、顺序、唯一中性根节点、资源上限、
   横向溢出保护与交互启动；
-- 无需网络即可打开和运行。
+- 无需网络即可打开和验证；只使用内嵌数据的交互逻辑可以完整离线运行。
 
 被动链接可以保留。点击 `https:`、`mailto:`、`tel:`、fragment 或相对链接，
 属于用户主动导航。
+Markdown 中的远程图片会转换成被动链接，不会生成主动请求远程图片的 `<img>`。
+
+consumer JavaScript 属于受信任本地代码，不是受限能力沙箱。它可以在启动后
+主动调用 `fetch`、执行页面导航或使用其他浏览器网络 API。verification 不承诺
+阻止这些动作；如果成品必须保持网络静默，应审查 consumer script 及其依赖。
 
 contract-v1 仍可用于兼容验证，但 v1 note 可能包含历史远程资源，因此不享有
 contract-v2 的严格离线保证。应保留既有 v1 字节，或从源文件重建为 v2。
@@ -266,6 +279,20 @@ canonicalization 与转义。theme、manifest、renderer、consumer JavaScript/C
 
 402v HTML Kit 的边界止于一个通过验证的本地文件。CMS / database 写入、账号、
 可见性、托管、部署和网站发布均明确不在本项目范围内。
+
+## 外部发布 Gate
+
+源码已经满足本地 release-ready 条件，但不能假设外部资源已经存在。正式发布前，
+GlauconAI 必须控制 public GitHub 仓库、npm 的 `@402v` scope，以及三个包名。
+
+GitHub 的 `v*.*.*` ruleset 必须把 release tag 设为不可变的 signed annotated
+tag：禁止更新和删除，且只允许指定 release maintainer 或显式 bypass actor 创建。
+
+三个 npm 包都必须把 trusted publisher 设置为仓库
+`GlauconAI/402v-html-kit`、workflow `.github/workflows/release.yml` 和 environment
+`npm`。workflow 支持断点恢复；registry 中若已有同版本包，只有 integrity 与
+provenance 都匹配已验证源码时才会接受，否则 fail closed。仅根工作区使用的
+`sigstore@4.1.1`（Apache-2.0）不会进入生产包。
 
 ## 文档
 

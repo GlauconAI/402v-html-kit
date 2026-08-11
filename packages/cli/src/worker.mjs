@@ -1,17 +1,10 @@
 import {
-  closeSync,
   existsSync,
-  lstatSync,
-  linkSync,
   mkdirSync,
-  openSync,
   realpathSync,
-  renameSync,
   statSync,
-  unlinkSync,
-  writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -27,6 +20,7 @@ import {
 
 import { loadTheme, resolveThemeSelection } from "./theme-loader.mjs";
 import { readBoundedUtf8, readJsonValue } from "./json-input.mjs";
+import { atomicContainedWrite } from "./starter-write.mjs";
 
 const MAX_STRING_BYTES = 4_096;
 const MAX_REQUEST_STRING_BYTES = 32 * 1024;
@@ -441,12 +435,6 @@ async function initialize(options) {
   };
 }
 
-function contained(root, candidate) {
-  const difference = relative(root, candidate);
-  return difference === "" ||
-    (!isAbsolute(difference) && difference !== ".." && !difference.startsWith(`..${sep}`));
-}
-
 function prepareStarterDirectory(directory) {
   try {
     mkdirSync(directory, { recursive: true });
@@ -457,44 +445,6 @@ function prepareStarterDirectory(directory) {
   } catch (error) {
     if (error instanceof ArtifactBuildError) throw error;
     fail("ATOMIC_WRITE_FAILED", "Starter directory could not be prepared");
-  }
-}
-
-function atomicContainedWrite(directory, name, content, force) {
-  const canonical = realpathSync(directory);
-  const destination = resolve(canonical, name);
-  if (!contained(canonical, destination) || dirname(destination) !== canonical) {
-    fail("ATOMIC_WRITE_FAILED", "Starter destination escaped its directory");
-  }
-  const temporary = resolve(
-    canonical,
-    `.${basename(name)}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`,
-  );
-  let descriptor;
-  try {
-    descriptor = openSync(temporary, "wx", 0o600);
-    writeFileSync(descriptor, content, "utf8");
-    closeSync(descriptor);
-    descriptor = undefined;
-    if (realpathSync(directory) !== canonical || lstatSync(canonical).isSymbolicLink()) {
-      fail("ATOMIC_WRITE_FAILED", "Starter directory changed during write");
-    }
-    if (force) {
-      renameSync(temporary, destination);
-    } else {
-      linkSync(temporary, destination);
-      unlinkSync(temporary);
-    }
-  } catch (error) {
-    if (descriptor !== undefined) {
-      try { closeSync(descriptor); } catch {}
-    }
-    try { unlinkSync(temporary); } catch {}
-    if (error instanceof ArtifactBuildError) throw error;
-    if (!force && error?.code === "EEXIST") {
-      fail("OUTPUT_EXISTS", "Starter output appeared during installation");
-    }
-    fail("ATOMIC_WRITE_FAILED", "Starter file could not be installed atomically");
   }
 }
 

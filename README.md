@@ -9,8 +9,8 @@
 
 402v HTML Kit turns Markdown and structured JSON into deterministic,
 self-contained HTML artifacts. The result is one portable file: no server for
-the reader, no runtime dependency after the build, and no surprise network
-requests in a verified contract-v2 artifact.
+the reader, no Node.js/npm or external runtime installation after the build,
+and no active external asset dependency in a verified contract-v2 artifact.
 
 Use it for durable notes, AI-agent reports, interactive data briefs, project
 archives, or any deliverable that should remain readable long after its build
@@ -94,7 +94,8 @@ npm exec -- 402v-html-kit build examples/note/input.md \
 npm exec -- 402v-html-kit verify examples/note/output.html
 ```
 
-Success is machine-readable:
+Success is machine-readable (abbreviated here; the real result also includes
+`command` and `sourceHash`):
 
 ```json
 {"ok":true,"contractVersion":2,"mode":"note","dataBlockIds":[],"issues":[]}
@@ -144,8 +145,9 @@ export function renderArtifact({ data }) {
 }
 ```
 
-Build it twice when exact-byte determinism matters, then verify every required
-block:
+The builder renders twice internally by default and rejects differing bytes.
+One command is therefore enough to enforce exact-byte determinism; then verify
+every required block:
 
 ```sh
 npm exec -- 402v-html-kit build-artifact examples/interactive/artifact.mjs \
@@ -165,10 +167,12 @@ const ids = window.__htmlKitArtifact.dataIds();
 Update one stable block without hand-editing the HTML:
 
 ```sh
-npm exec -- 402v-html-kit update-data reports/project-brief.html \
-  --manifest reports/artifact.mjs \
+cp examples/interactive/data.json /tmp/402v-data.next.json
+
+npm exec -- 402v-html-kit update-data examples/interactive/output.html \
+  --manifest examples/interactive/artifact.mjs \
   --id dashboard \
-  --input reports/data.next.json \
+  --input /tmp/402v-data.next.json \
   --force
 ```
 
@@ -262,11 +266,17 @@ A verified contract-v2 artifact:
   event-handler attributes, external SVG references, and CSS dependencies;
 - validates canonical JSON, source hashes, ordering, one neutral root,
   resource ceilings, overflow protection, and interactive startup;
-- opens and runs without network access.
+- opens and can be verified without network access; interactive behavior that
+  uses only embedded data runs offline.
 
 Passive links may remain. Following an `https:`, `mailto:`, `tel:`, fragment,
 or relative link is an explicit user navigation. Remote Markdown images are
 rendered as passive links instead of active image requests.
+
+Consumer JavaScript is trusted local code, not a sandboxed capability. It can
+deliberately call `fetch`, navigate, or use another browser network API after
+startup. Verification does not claim to prevent those actions; review consumer
+scripts and their dependencies when a network-silent artifact is required.
 
 Contract-v1 note verification retains remote image compatibility, so v1 notes
 may contain legacy remote resources and do **not** receive the strict

@@ -55,6 +55,8 @@ const packageDefinitions = Object.freeze([
       "package.json",
       "src/cli.mjs",
       "src/json-input.mjs",
+      "src/starter-write.d.mts",
+      "src/starter-write.mjs",
       "src/theme-loader.mjs",
       "src/worker.mjs",
     ],
