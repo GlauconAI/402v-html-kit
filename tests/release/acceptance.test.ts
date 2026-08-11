@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   controlledNpmEnvironment,
+  hashTarPayload,
   sanitizedEnvironment,
 } from "../package-smoke/pack-smoke.mjs";
 
@@ -54,7 +55,7 @@ const expectedPackages = [
     name: "@402v/html-kit-core",
     version: "0.1.0",
     tarball: "402v-html-kit-core-0.1.0.tgz",
-    sha256: "7154ae884070decc5ca2fb2484cf09ce5e16322cc6a176ea9509a2347d815bed",
+    payloadSha256: "73b1b62821fcf4689603ebbf0e1f368750de20092fc4cab52f1b5ad9c2c63eb2",
     fileCount: 38,
   },
   {
@@ -62,7 +63,7 @@ const expectedPackages = [
     name: "@402v/theme-402v",
     version: "0.1.0",
     tarball: "402v-theme-402v-0.1.0.tgz",
-    sha256: "144c9de1b6a8146c1ac321a41ef2a72a7ea7678326d74b684bcaa835307acab4",
+    payloadSha256: "e7b9eba5129b24d4134a4b565451e411e841eb8702e6bb5ae733e5bed9cdb4c3",
     fileCount: 6,
   },
   {
@@ -70,13 +71,13 @@ const expectedPackages = [
     name: "@402v/html-kit-cli",
     version: "0.1.0",
     tarball: "402v-html-kit-cli-0.1.0.tgz",
-    sha256: "cb8c7aa1d1b0d8e2a49166597dc34e119a93b0897064ffac4a5b5f579996b7ed",
+    payloadSha256: "525070ab589808313087bc660920b367b10d26443bc2106713661c90c90d9390",
     fileCount: 7,
   },
 ] as const;
 
 type ReleaseEvidence = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   releaseVersion: string;
   commits: { baseline: string; oss: string; siteIntegration: string };
   testTotals: {
@@ -89,7 +90,7 @@ type ReleaseEvidence = {
     name: string;
     version: string;
     tarball: string;
-    sha256: string;
+    payloadSha256: string;
     fileCount: number;
   }>;
   frozenV1: Record<string, string>;
@@ -286,7 +287,7 @@ function buildExampleHashes() {
   }
 }
 
-function packSha256s() {
+function packPayloadSha256s() {
   const root = mkdtempSync(join(tmpdir(), "402v-rc-acceptance-pack-"));
   try {
     for (const packageDefinition of expectedPackages) {
@@ -311,9 +312,10 @@ function packSha256s() {
     }
     return expectedPackages.map(({ tarball }) => ({
       tarball,
-      sha256: createHash("sha256")
-        .update(readFileSync(join(root, tarball)))
-        .digest("hex"),
+      payloadSha256: hashTarPayload(
+        readFileSync(join(root, tarball)),
+        "sha256",
+      ).toString("hex"),
     }));
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -491,8 +493,11 @@ describe.sequential("local release candidate acceptance", () => {
       expect.objectContaining({ name: "@402v/html-kit-core", fileCount: 38 }),
       expect.objectContaining({ name: "@402v/theme-402v", fileCount: 6 }),
     ]);
-    expect(packSha256s()).toEqual(
-      expectedPackages.map(({ tarball, sha256 }) => ({ tarball, sha256 })),
+    expect(packPayloadSha256s()).toEqual(
+      expectedPackages.map(({ tarball, payloadSha256 }) => ({
+        tarball,
+        payloadSha256,
+      })),
     );
   }, 190_000);
 
@@ -505,7 +510,7 @@ describe.sequential("local release candidate acceptance", () => {
       manifest: JSON.parse(read(path)) as { name: string; version: string },
     }));
     expect(evidence).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       releaseVersion: "0.1.0",
       commits: {
         baseline: "9527b4fd8c3ff3c49180516440f715a6d1798c8f",
@@ -514,7 +519,7 @@ describe.sequential("local release candidate acceptance", () => {
       },
       testTotals: {
         baseline: { files: 105, tests: 703 },
-        oss: { files: 24, packageCiTests: 393, localRcTests: 394 },
+        oss: { files: 24, packageCiTests: 395, localRcTests: 396 },
         site: { files: 96, passed: 524, skipped: 1 },
       },
       frozenV1: frozenFixtures,
@@ -528,7 +533,7 @@ describe.sequential("local release candidate acceptance", () => {
       },
       productionAudit: {
         command: "npm audit --omit=dev --json",
-        observedAt: "2026-08-11T22:29:55Z",
+        observedAt: "2026-08-11T23:21:14Z",
         packageLockSha256:
           "e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc",
         high: 0,

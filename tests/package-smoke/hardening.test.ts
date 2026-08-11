@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   existsSync,
@@ -11,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -124,6 +126,7 @@ describe("package boundary hardening", () => {
       "binaryCommandArguments",
       "controlledNpmEnvironment",
       "hashArchive",
+      "hashTarPayload",
       "inspectPublishedText",
       "installedBinaryPlan",
       "npmExecutionPlan",
@@ -139,6 +142,20 @@ describe("package boundary hardening", () => {
     ]) {
       expect(smoke[name], name).toBeTypeOf("function");
     }
+  });
+
+  it("hashes the tar payload independently of the gzip platform header", () => {
+    const payload = Buffer.from("portable tar payload");
+    const macosWrapper = gzipSync(payload);
+    const linuxWrapper = Buffer.from(macosWrapper);
+    linuxWrapper[9] = 3;
+
+    expect(createHash("sha256").update(macosWrapper).digest("hex")).not.toBe(
+      createHash("sha256").update(linuxWrapper).digest("hex"),
+    );
+    expect(smoke.hashTarPayload(macosWrapper, "sha256")).toEqual(
+      smoke.hashTarPayload(linuxWrapper, "sha256"),
+    );
   });
 
   it.each([

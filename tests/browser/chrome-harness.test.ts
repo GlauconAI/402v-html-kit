@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   CdpConnection,
   launchChrome,
+  removeChromeProfile,
   stopChrome,
 } from "./chrome-harness.mjs";
 
@@ -56,6 +57,32 @@ class FakeWebSocket extends EventTarget {
 }
 
 describe("Chrome browser harness lifecycle", () => {
+  it("configures bounded retries for transient profile cleanup races", async () => {
+    let observed:
+      | { path: string; options: Record<string, unknown> }
+      | undefined;
+
+    await removeChromeProfile(
+      "/tmp/transient-profile",
+      async (path, options) => {
+        observed = {
+          path: String(path),
+          options: options as Record<string, unknown>,
+        };
+      },
+    );
+
+    expect(observed).toEqual({
+      path: "/tmp/transient-profile",
+      options: {
+        force: true,
+        maxRetries: 5,
+        recursive: true,
+        retryDelay: 100,
+      },
+    });
+  });
+
   it("rejects an invalid explicit CHROME_PATH before allocating resources", async () => {
     let profileCreated = false;
     let childSpawned = false;

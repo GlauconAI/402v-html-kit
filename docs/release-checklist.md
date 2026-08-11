@@ -11,7 +11,7 @@ reproduced on 2026-08-11 (America/Vancouver).
 <!-- release-evidence:start -->
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "releaseVersion": "0.1.0",
   "commits": {
     "baseline": "9527b4fd8c3ff3c49180516440f715a6d1798c8f",
@@ -20,7 +20,7 @@ reproduced on 2026-08-11 (America/Vancouver).
   },
   "testTotals": {
     "baseline": { "files": 105, "tests": 703 },
-    "oss": { "files": 24, "packageCiTests": 393, "localRcTests": 394 },
+    "oss": { "files": 24, "packageCiTests": 395, "localRcTests": 396 },
     "site": { "files": 96, "passed": 524, "skipped": 1 }
   },
   "packages": [
@@ -29,7 +29,7 @@ reproduced on 2026-08-11 (America/Vancouver).
       "name": "@402v/html-kit-core",
       "version": "0.1.0",
       "tarball": "402v-html-kit-core-0.1.0.tgz",
-      "sha256": "7154ae884070decc5ca2fb2484cf09ce5e16322cc6a176ea9509a2347d815bed",
+      "payloadSha256": "73b1b62821fcf4689603ebbf0e1f368750de20092fc4cab52f1b5ad9c2c63eb2",
       "fileCount": 38
     },
     {
@@ -37,7 +37,7 @@ reproduced on 2026-08-11 (America/Vancouver).
       "name": "@402v/theme-402v",
       "version": "0.1.0",
       "tarball": "402v-theme-402v-0.1.0.tgz",
-      "sha256": "144c9de1b6a8146c1ac321a41ef2a72a7ea7678326d74b684bcaa835307acab4",
+      "payloadSha256": "e7b9eba5129b24d4134a4b565451e411e841eb8702e6bb5ae733e5bed9cdb4c3",
       "fileCount": 6
     },
     {
@@ -45,7 +45,7 @@ reproduced on 2026-08-11 (America/Vancouver).
       "name": "@402v/html-kit-cli",
       "version": "0.1.0",
       "tarball": "402v-html-kit-cli-0.1.0.tgz",
-      "sha256": "cb8c7aa1d1b0d8e2a49166597dc34e119a93b0897064ffac4a5b5f579996b7ed",
+      "payloadSha256": "525070ab589808313087bc660920b367b10d26443bc2106713661c90c90d9390",
       "fileCount": 7
     }
   ],
@@ -76,7 +76,7 @@ reproduced on 2026-08-11 (America/Vancouver).
   },
   "productionAudit": {
     "command": "npm audit --omit=dev --json",
-    "observedAt": "2026-08-11T22:29:55Z",
+    "observedAt": "2026-08-11T23:21:14Z",
     "packageLockSha256": "e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc",
     "high": 0,
     "critical": 0,
@@ -108,10 +108,10 @@ fe86990674d2327c53b4dc4f4b234bed70e27d33
   `CHANGELOG.md` contains `[0.1.0]`.
 
 The tarballs were produced with a private temporary npm cache and
-`npm pack --ignore-scripts --workspace <name>`. `shasum -a 256 *.tgz`
-returned the three SHA-256 values in the evidence block. Independently,
-`npm run pack:check` parsed the tar payloads and reported 38 core files, six
-theme files, and seven CLI files.
+`npm pack --ignore-scripts --workspace <name>`. The evidence hashes the
+uncompressed tar payload so npm's platform-specific gzip header cannot change
+the digest. Independently, `npm run pack:check` parsed the tar payloads and
+reported 38 core files, six theme files, and seven CLI files.
 
 ## Local verification gates
 
@@ -119,11 +119,11 @@ theme files, and seven CLI files.
 | --- | --- | --- |
 | clean lock install | `npm ci` | exit 0; lockfile-only install |
 | declarations | `npm run typecheck` | exit 0 |
-| full OSS suite | `HTML_KIT_SITE_WORKTREE=<site-worktree> npm test` | 24 files; 394 tests passed; real Chrome and local cross-repository gate included |
+| full OSS suite | `HTML_KIT_SITE_WORKTREE=<site-worktree> npm test` | 24 files; 396 tests passed; real Chrome and local cross-repository gate included |
 | v1 compatibility | `npm test -- tests/compatibility` | frozen hashes, contract-v1 mutation rejection, and explicit contract-v1 upgrade passed |
 | browser acceptance | `npm test -- tests/browser` | desktop/mobile note, interactive, and custom-theme cases passed with zero external requests |
 | package boundary | `npm run pack:check` | clean offline consumer passed; file counts 7/38/6; 148 production license entries |
-| production audit | `npm audit --omit=dev --json` | fresh registry result at `2026-08-11T22:29:55Z`: 0 high, 0 critical, 0 total; lock SHA-256 `e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc` |
+| production audit | `npm audit --omit=dev --json` | fresh registry result at `2026-08-11T23:21:14Z`: 0 high, 0 critical, 0 total; lock SHA-256 `e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc` |
 | license scan | `npm run pack:check` | all 148 package/version rows matched the reviewed SPDX allowlist |
 | forbidden/secret scan | `npm run pack:check` | no credential, private-infrastructure, host-path, or unapproved brand hit |
 | formatting | `git diff --check` | exit 0 |
@@ -162,9 +162,9 @@ deterministic verified contract-v2 bytes without mutating its source.
 
 The site adapter is a separate local RC gate. Public package CI has no site
 checkout, so the conditional test is skipped when `HTML_KIT_SITE_WORKTREE` is
-absent: package-only CI therefore records 393 passing tests plus this one
+absent: package-only CI therefore records 395 passing tests plus this one
 explicit skip. A local release-candidate decision is incomplete until the
-variable is set to the isolated site-integration worktree and all 394 tests,
+variable is set to the isolated site-integration worktree and all 396 tests,
 including this command, pass:
 
 ```text

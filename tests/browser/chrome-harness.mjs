@@ -272,11 +272,20 @@ async function terminateChild(child, graceMs) {
   await waitForExit(child);
 }
 
+export function removeChromeProfile(path, remove = rm) {
+  return remove(path, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
+}
+
 function defaultDependencies() {
   return {
     exists: existsSync,
     createProfile: () => mkdtemp(join(tmpdir(), "402v-theme-browser-")),
-    removeProfile: (path) => rm(path, { recursive: true, force: true }),
+    removeProfile: removeChromeProfile,
     spawnChrome: (executable, args) =>
       spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] }),
     connect: (endpoint, options) => CdpConnection.connect(endpoint, options),

@@ -665,6 +665,10 @@ export function hashArchive(archive, algorithm) {
   return createHash(algorithm).update(archive).digest();
 }
 
+export function hashTarPayload(archive, algorithm) {
+  return createHash(algorithm).update(gunzipSync(archive)).digest();
+}
+
 export function verifyArchiveIntegrity(archive, integrity) {
   const match = integrity?.match(/^sha512-([A-Za-z0-9+/]{86}==)$/u);
   if (match === null || match === undefined) {
