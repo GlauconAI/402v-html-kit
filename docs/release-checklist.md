@@ -1,12 +1,12 @@
 # 402v HTML Kit 0.1.0 local release checklist
 
-Status: **local release candidate only**. No GitHub repository, npm package,
-Skill proposal, website branch, or production deployment was created, applied,
-published, pushed, merged, or deployed by these checks.
+Status: **local release candidate evidence**. This record verifies source and
+package bytes; it is not evidence that a GitHub push, GitHub Release, npm
+publication, website merge, or production deployment has completed.
 
 The JSON block is the machine-readable record consumed by
 `tests/release/acceptance.test.ts`. The prose below records how every value was
-reproduced on 2026-08-10 (America/Vancouver).
+reproduced on 2026-08-11 (America/Vancouver).
 
 <!-- release-evidence:start -->
 ```json
@@ -15,12 +15,12 @@ reproduced on 2026-08-10 (America/Vancouver).
   "releaseVersion": "0.1.0",
   "commits": {
     "baseline": "9527b4fd8c3ff3c49180516440f715a6d1798c8f",
-    "oss": "59f01074c7daca6de38e30550fea2ca4335d0eff",
+    "oss": "fe86990674d2327c53b4dc4f4b234bed70e27d33",
     "siteIntegration": "f7b2a60c522f3cba48168de8a70e5642ef58fab2"
   },
   "testTotals": {
     "baseline": { "files": 105, "tests": 703 },
-    "oss": { "files": 23, "packageCiTests": 393, "localRcTests": 394 },
+    "oss": { "files": 24, "packageCiTests": 393, "localRcTests": 394 },
     "site": { "files": 96, "passed": 524, "skipped": 1 }
   },
   "packages": [
@@ -45,8 +45,8 @@ reproduced on 2026-08-10 (America/Vancouver).
       "name": "@402v/html-kit-cli",
       "version": "0.1.0",
       "tarball": "402v-html-kit-cli-0.1.0.tgz",
-      "sha256": "18662c622a6b49ad11b5a9a1881af860a1565bfba2e12af891fd4df9adc02a95",
-      "fileCount": 5
+      "sha256": "cb8c7aa1d1b0d8e2a49166597dc34e119a93b0897064ffac4a5b5f579996b7ed",
+      "fileCount": 7
     }
   ],
   "frozenV1": {
@@ -76,7 +76,7 @@ reproduced on 2026-08-10 (America/Vancouver).
   },
   "productionAudit": {
     "command": "npm audit --omit=dev --json",
-    "observedAt": "2026-08-10T18:29:48Z",
+    "observedAt": "2026-08-11T22:29:55Z",
     "packageLockSha256": "e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc",
     "high": 0,
     "critical": 0,
@@ -90,18 +90,18 @@ reproduced on 2026-08-10 (America/Vancouver).
 
 ```text
 $ node --version
-v25.9.0
+v24.19.0
 $ npm --version
-11.12.1
+11.17.0
 $ git rev-parse HEAD
-59f01074c7daca6de38e30550fea2ca4335d0eff
+fe86990674d2327c53b4dc4f4b234bed70e27d33
 ```
 
 - Extraction/source baseline:
   `glaucon-politeia@9527b4fd8c3ff3c49180516440f715a6d1798c8f`.
   The approved clean-baseline run was **105 test files / 703 tests**.
 - Open-source package source under acceptance:
-  `402v-html-kit@59f01074c7daca6de38e30550fea2ca4335d0eff`.
+  `402v-html-kit@fe86990674d2327c53b4dc4f4b234bed70e27d33`.
 - Local-only site adapter:
   `glaucon-politeia@f7b2a60c522f3cba48168de8a70e5642ef58fab2`.
 - `package.json` in all three package directories reports `0.1.0`, and
@@ -111,7 +111,7 @@ The tarballs were produced with a private temporary npm cache and
 `npm pack --ignore-scripts --workspace <name>`. `shasum -a 256 *.tgz`
 returned the three SHA-256 values in the evidence block. Independently,
 `npm run pack:check` parsed the tar payloads and reported 38 core files, six
-theme files, and five CLI files.
+theme files, and seven CLI files.
 
 ## Local verification gates
 
@@ -119,11 +119,11 @@ theme files, and five CLI files.
 | --- | --- | --- |
 | clean lock install | `npm ci` | exit 0; lockfile-only install |
 | declarations | `npm run typecheck` | exit 0 |
-| full OSS suite | `HTML_KIT_SITE_WORKTREE=<site-worktree> npm test` | 23 files; 394 tests passed; real Chrome and local cross-repository gate included |
+| full OSS suite | `HTML_KIT_SITE_WORKTREE=<site-worktree> npm test` | 24 files; 394 tests passed; real Chrome and local cross-repository gate included |
 | v1 compatibility | `npm test -- tests/compatibility` | frozen hashes, contract-v1 mutation rejection, and explicit contract-v1 upgrade passed |
 | browser acceptance | `npm test -- tests/browser` | desktop/mobile note, interactive, and custom-theme cases passed with zero external requests |
-| package boundary | `npm run pack:check` | clean offline consumer passed; file counts 5/38/6; 148 production license entries |
-| production audit | `npm audit --omit=dev --json` | fresh registry result at `2026-08-10T18:29:48Z`: 0 high, 0 critical, 0 total; lock SHA-256 `e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc` |
+| package boundary | `npm run pack:check` | clean offline consumer passed; file counts 7/38/6; 148 production license entries |
+| production audit | `npm audit --omit=dev --json` | fresh registry result at `2026-08-11T22:29:55Z`: 0 high, 0 critical, 0 total; lock SHA-256 `e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc` |
 | license scan | `npm run pack:check` | all 148 package/version rows matched the reviewed SPDX allowlist |
 | forbidden/secret scan | `npm run pack:check` | no credential, private-infrastructure, host-path, or unapproved brand hit |
 | formatting | `git diff --check` | exit 0 |
@@ -187,9 +187,9 @@ dedicated clean-export install gate passed separately.
 
 ## Known limitations and Rollback
 
-- Public GitHub creation/push, tag ruleset setup, npm trusted-publisher setup,
-  npm publication, Skill application, site merge/push, and production deploy
-  remain explicit external gates.
+- At the time this local record was produced, GitHub push and metadata, tag
+  ruleset setup, npm trusted-publisher setup, npm publication, site merge/push,
+  and production deploy remained explicit external gates.
 - The release workflow is prepared and locally simulated, but trusted OIDC
   provenance can only be proven after GitHub and npm setup is explicitly
   authorized.
@@ -200,8 +200,8 @@ dedicated clean-export install gate passed separately.
 
 Rollback points:
 
-- OSS documentation/acceptance rollback: reset only the Task 15 commit to its
-  parent `59f01074c7daca6de38e30550fea2ca4335d0eff`.
+- Release-evidence rollback: revert the evidence commit while retaining its
+  verified source parent `fe86990674d2327c53b4dc4f4b234bed70e27d33`.
 - Site migration rollback: restore the pre-integration baseline
   `9527b4fd8c3ff3c49180516440f715a6d1798c8f`; the local integration candidate
   remains available at `f7b2a60c522f3cba48168de8a70e5642ef58fab2`.

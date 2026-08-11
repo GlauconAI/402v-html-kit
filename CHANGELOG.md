@@ -8,7 +8,7 @@ the project uses Semantic Versioning.
 - External GitHub and npm setup remains gated; no package has been published by
   this repository preparation.
 
-## [0.1.0] - 2026-08-10
+## [0.1.0] - 2026-08-11
 
 ### Added
 

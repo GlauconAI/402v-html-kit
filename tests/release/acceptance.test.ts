@@ -70,8 +70,8 @@ const expectedPackages = [
     name: "@402v/html-kit-cli",
     version: "0.1.0",
     tarball: "402v-html-kit-cli-0.1.0.tgz",
-    sha256: "18662c622a6b49ad11b5a9a1881af860a1565bfba2e12af891fd4df9adc02a95",
-    fileCount: 5,
+    sha256: "cb8c7aa1d1b0d8e2a49166597dc34e119a93b0897064ffac4a5b5f579996b7ed",
+    fileCount: 7,
   },
 ] as const;
 
@@ -487,7 +487,7 @@ describe.sequential("local release candidate acceptance", () => {
       productionLicenseCount: 148,
     });
     expect(summary.packages).toEqual([
-      expect.objectContaining({ name: "@402v/html-kit-cli", fileCount: 5 }),
+      expect.objectContaining({ name: "@402v/html-kit-cli", fileCount: 7 }),
       expect.objectContaining({ name: "@402v/html-kit-core", fileCount: 38 }),
       expect.objectContaining({ name: "@402v/theme-402v", fileCount: 6 }),
     ]);
@@ -509,12 +509,12 @@ describe.sequential("local release candidate acceptance", () => {
       releaseVersion: "0.1.0",
       commits: {
         baseline: "9527b4fd8c3ff3c49180516440f715a6d1798c8f",
-        oss: "59f01074c7daca6de38e30550fea2ca4335d0eff",
+        oss: "fe86990674d2327c53b4dc4f4b234bed70e27d33",
         siteIntegration: "f7b2a60c522f3cba48168de8a70e5642ef58fab2",
       },
       testTotals: {
         baseline: { files: 105, tests: 703 },
-        oss: { files: 23, packageCiTests: 393, localRcTests: 394 },
+        oss: { files: 24, packageCiTests: 393, localRcTests: 394 },
         site: { files: 96, passed: 524, skipped: 1 },
       },
       frozenV1: frozenFixtures,
@@ -528,7 +528,7 @@ describe.sequential("local release candidate acceptance", () => {
       },
       productionAudit: {
         command: "npm audit --omit=dev --json",
-        observedAt: "2026-08-10T18:29:48Z",
+        observedAt: "2026-08-11T22:29:55Z",
         packageLockSha256:
           "e525fd2bcc97ea6e4efec4c901c2890e515daf16a371e209c49654b89d4ef6dc",
         high: 0,
@@ -560,7 +560,7 @@ describe.sequential("local release candidate acceptance", () => {
     expect(checklist).not.toMatch(/cached\/offline production audit|npm audit[^`\n]*--offline/iu);
     for (const required of [
       "9527b4fd8c3ff3c49180516440f715a6d1798c8f",
-      "59f01074c7daca6de38e30550fea2ca4335d0eff",
+      "fe86990674d2327c53b4dc4f4b234bed70e27d33",
       "f7b2a60c522f3cba48168de8a70e5642ef58fab2",
       "105 test files / 703 tests",
       "npm run typecheck",
