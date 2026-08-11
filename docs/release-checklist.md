@@ -11,7 +11,7 @@ reproduced on 2026-08-11 (America/Vancouver).
 <!-- release-evidence:start -->
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "releaseVersion": "0.1.0",
   "commits": {
     "baseline": "9527b4fd8c3ff3c49180516440f715a6d1798c8f",
@@ -29,7 +29,7 @@ reproduced on 2026-08-11 (America/Vancouver).
       "name": "@402v/html-kit-core",
       "version": "0.1.0",
       "tarball": "402v-html-kit-core-0.1.0.tgz",
-      "payloadSha256": "73b1b62821fcf4689603ebbf0e1f368750de20092fc4cab52f1b5ad9c2c63eb2",
+      "contentsSha256": "5a096b33682764cd8d4f6e38dbd4a695ea17f134d7fb07929aeff3ee718593b0",
       "fileCount": 38
     },
     {
@@ -37,7 +37,7 @@ reproduced on 2026-08-11 (America/Vancouver).
       "name": "@402v/theme-402v",
       "version": "0.1.0",
       "tarball": "402v-theme-402v-0.1.0.tgz",
-      "payloadSha256": "e7b9eba5129b24d4134a4b565451e411e841eb8702e6bb5ae733e5bed9cdb4c3",
+      "contentsSha256": "25d42a9eb236eddc9851b1e09ec7378cbd71e9313e26d030ba41be0e5b5cfad4",
       "fileCount": 6
     },
     {
@@ -45,7 +45,7 @@ reproduced on 2026-08-11 (America/Vancouver).
       "name": "@402v/html-kit-cli",
       "version": "0.1.0",
       "tarball": "402v-html-kit-cli-0.1.0.tgz",
-      "payloadSha256": "525070ab589808313087bc660920b367b10d26443bc2106713661c90c90d9390",
+      "contentsSha256": "fb5aa94064a9e76def9ee3c4705c4ba9e32679e4a46ca039abc2ff8b1961cd89",
       "fileCount": 7
     }
   ],
@@ -108,10 +108,11 @@ fe86990674d2327c53b4dc4f4b234bed70e27d33
   `CHANGELOG.md` contains `[0.1.0]`.
 
 The tarballs were produced with a private temporary npm cache and
-`npm pack --ignore-scripts --workspace <name>`. The evidence hashes the
-uncompressed tar payload so npm's platform-specific gzip header cannot change
-the digest. Independently, `npm run pack:check` parsed the tar payloads and
-reported 38 core files, six theme files, and seven CLI files.
+`npm pack --ignore-scripts --workspace <name>`. The evidence canonically hashes
+each sorted file path, executable mode, and file body, so gzip and tar metadata
+from the host or npm version cannot change the digest. Independently,
+`npm run pack:check` parsed the tarballs and reported 38 core files, six theme
+files, and seven CLI files.
 
 ## Local verification gates
 

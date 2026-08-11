@@ -20,6 +20,41 @@ const smokeScript = fileURLToPath(new URL("./pack-smoke.mjs", import.meta.url));
 const temporaryRoots: string[] = [];
 const smoke = await import("./pack-smoke.mjs") as Record<string, any>;
 
+function tarballWithMetadata({
+  content,
+  modifiedAt,
+  user,
+}: {
+  content: string;
+  modifiedAt: number;
+  user: string;
+}) {
+  const header = Buffer.alloc(512);
+  const writeString = (offset: number, length: number, value: string) => {
+    header.write(value, offset, Math.min(length, Buffer.byteLength(value)), "utf8");
+  };
+  const writeOctal = (offset: number, length: number, value: number) => {
+    writeString(offset, length, `${value.toString(8).padStart(length - 1, "0")}\0`);
+  };
+  const body = Buffer.from(content);
+  writeString(0, 100, "package/example.txt");
+  writeOctal(100, 8, 0o644);
+  writeOctal(108, 8, 501);
+  writeOctal(116, 8, 20);
+  writeOctal(124, 12, body.length);
+  writeOctal(136, 12, modifiedAt);
+  header.fill(32, 148, 156);
+  writeString(156, 1, "0");
+  writeString(257, 6, "ustar\0");
+  writeString(263, 2, "00");
+  writeString(265, 32, user);
+  writeString(297, 32, "staff");
+  const checksum = header.reduce((total, byte) => total + byte, 0);
+  writeString(148, 8, `${checksum.toString(8).padStart(6, "0")}\0 `);
+  const padding = Buffer.alloc(Math.ceil(body.length / 512) * 512 - body.length);
+  return gzipSync(Buffer.concat([header, body, padding, Buffer.alloc(1024)]));
+}
+
 function inspect(source: string | Buffer, options: Record<string, unknown> = {}) {
   return smoke.inspectPublishedText({
     packageName: "@402v/html-kit-core",
@@ -126,7 +161,7 @@ describe("package boundary hardening", () => {
       "binaryCommandArguments",
       "controlledNpmEnvironment",
       "hashArchive",
-      "hashTarPayload",
+      "hashTarballContents",
       "inspectPublishedText",
       "installedBinaryPlan",
       "npmExecutionPlan",
@@ -144,17 +179,31 @@ describe("package boundary hardening", () => {
     }
   });
 
-  it("hashes the tar payload independently of the gzip platform header", () => {
-    const payload = Buffer.from("portable tar payload");
-    const macosWrapper = gzipSync(payload);
-    const linuxWrapper = Buffer.from(macosWrapper);
-    linuxWrapper[9] = 3;
+  it("hashes package contents independently of gzip and tar metadata", () => {
+    const first = tarballWithMetadata({
+      content: "portable package contents",
+      modifiedAt: 1,
+      user: "mac-builder",
+    });
+    const second = tarballWithMetadata({
+      content: "portable package contents",
+      modifiedAt: 2,
+      user: "linux-builder",
+    });
+    const changed = tarballWithMetadata({
+      content: "changed package contents",
+      modifiedAt: 2,
+      user: "linux-builder",
+    });
 
-    expect(createHash("sha256").update(macosWrapper).digest("hex")).not.toBe(
-      createHash("sha256").update(linuxWrapper).digest("hex"),
+    expect(createHash("sha256").update(first).digest("hex")).not.toBe(
+      createHash("sha256").update(second).digest("hex"),
     );
-    expect(smoke.hashTarPayload(macosWrapper, "sha256")).toEqual(
-      smoke.hashTarPayload(linuxWrapper, "sha256"),
+    expect(smoke.hashTarballContents(first, "sha256")).toEqual(
+      smoke.hashTarballContents(second, "sha256"),
+    );
+    expect(smoke.hashTarballContents(first, "sha256")).not.toEqual(
+      smoke.hashTarballContents(changed, "sha256"),
     );
   });
 

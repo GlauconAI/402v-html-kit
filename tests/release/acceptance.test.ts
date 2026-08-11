@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   controlledNpmEnvironment,
-  hashTarPayload,
+  hashTarballContents,
   sanitizedEnvironment,
 } from "../package-smoke/pack-smoke.mjs";
 
@@ -55,7 +55,7 @@ const expectedPackages = [
     name: "@402v/html-kit-core",
     version: "0.1.0",
     tarball: "402v-html-kit-core-0.1.0.tgz",
-    payloadSha256: "73b1b62821fcf4689603ebbf0e1f368750de20092fc4cab52f1b5ad9c2c63eb2",
+    contentsSha256: "5a096b33682764cd8d4f6e38dbd4a695ea17f134d7fb07929aeff3ee718593b0",
     fileCount: 38,
   },
   {
@@ -63,7 +63,7 @@ const expectedPackages = [
     name: "@402v/theme-402v",
     version: "0.1.0",
     tarball: "402v-theme-402v-0.1.0.tgz",
-    payloadSha256: "e7b9eba5129b24d4134a4b565451e411e841eb8702e6bb5ae733e5bed9cdb4c3",
+    contentsSha256: "25d42a9eb236eddc9851b1e09ec7378cbd71e9313e26d030ba41be0e5b5cfad4",
     fileCount: 6,
   },
   {
@@ -71,13 +71,13 @@ const expectedPackages = [
     name: "@402v/html-kit-cli",
     version: "0.1.0",
     tarball: "402v-html-kit-cli-0.1.0.tgz",
-    payloadSha256: "525070ab589808313087bc660920b367b10d26443bc2106713661c90c90d9390",
+    contentsSha256: "fb5aa94064a9e76def9ee3c4705c4ba9e32679e4a46ca039abc2ff8b1961cd89",
     fileCount: 7,
   },
 ] as const;
 
 type ReleaseEvidence = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   releaseVersion: string;
   commits: { baseline: string; oss: string; siteIntegration: string };
   testTotals: {
@@ -90,7 +90,7 @@ type ReleaseEvidence = {
     name: string;
     version: string;
     tarball: string;
-    payloadSha256: string;
+    contentsSha256: string;
     fileCount: number;
   }>;
   frozenV1: Record<string, string>;
@@ -287,7 +287,7 @@ function buildExampleHashes() {
   }
 }
 
-function packPayloadSha256s() {
+function packContentsSha256s() {
   const root = mkdtempSync(join(tmpdir(), "402v-rc-acceptance-pack-"));
   try {
     for (const packageDefinition of expectedPackages) {
@@ -312,7 +312,7 @@ function packPayloadSha256s() {
     }
     return expectedPackages.map(({ tarball }) => ({
       tarball,
-      payloadSha256: hashTarPayload(
+      contentsSha256: hashTarballContents(
         readFileSync(join(root, tarball)),
         "sha256",
       ).toString("hex"),
@@ -493,10 +493,10 @@ describe.sequential("local release candidate acceptance", () => {
       expect.objectContaining({ name: "@402v/html-kit-core", fileCount: 38 }),
       expect.objectContaining({ name: "@402v/theme-402v", fileCount: 6 }),
     ]);
-    expect(packPayloadSha256s()).toEqual(
-      expectedPackages.map(({ tarball, payloadSha256 }) => ({
+    expect(packContentsSha256s()).toEqual(
+      expectedPackages.map(({ tarball, contentsSha256 }) => ({
         tarball,
-        payloadSha256,
+        contentsSha256,
       })),
     );
   }, 190_000);
@@ -510,7 +510,7 @@ describe.sequential("local release candidate acceptance", () => {
       manifest: JSON.parse(read(path)) as { name: string; version: string },
     }));
     expect(evidence).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       releaseVersion: "0.1.0",
       commits: {
         baseline: "9527b4fd8c3ff3c49180516440f715a6d1798c8f",

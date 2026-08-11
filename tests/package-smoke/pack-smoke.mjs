@@ -665,10 +665,6 @@ export function hashArchive(archive, algorithm) {
   return createHash(algorithm).update(archive).digest();
 }
 
-export function hashTarPayload(archive, algorithm) {
-  return createHash(algorithm).update(gunzipSync(archive)).digest();
-}
-
 export function verifyArchiveIntegrity(archive, integrity) {
   const match = integrity?.match(/^sha512-([A-Za-z0-9+/]{86}==)$/u);
   if (match === null || match === undefined) {
@@ -1110,8 +1106,7 @@ async function runNpm(plan, args, options = {}) {
   return await command(plan.executable, npmCommandArguments(plan, args), options);
 }
 
-function readTarEntries(tarballPath) {
-  const archive = gunzipSync(readFileSync(tarballPath));
+function parseTarEntries(archive) {
   const entries = [];
   const directories = [];
   let offset = 0;
@@ -1154,6 +1149,32 @@ function readTarEntries(tarballPath) {
     fail("Tarball contains non-zero trailing bytes");
   }
   return { directories, entries };
+}
+
+function readTarEntries(tarballPath) {
+  return parseTarEntries(gunzipSync(readFileSync(tarballPath)));
+}
+
+export function hashTarballContents(archive, algorithm) {
+  const hash = createHash(algorithm);
+  const { entries } = parseTarEntries(gunzipSync(archive));
+  const seenPaths = new Set();
+  const write = (value) => {
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(bytes.length));
+    hash.update(length);
+    hash.update(bytes);
+  };
+  for (const entry of entries.toSorted((left, right) =>
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0)) {
+    if (seenPaths.has(entry.path)) fail(`Duplicate tar entry: ${entry.path}`);
+    seenPaths.add(entry.path);
+    write(entry.path);
+    write(entry.mode & 0o777);
+    write(entry.content);
+  }
+  return hash.digest();
 }
 
 function assertSafeArchivePath(path) {

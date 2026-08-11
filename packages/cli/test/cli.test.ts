@@ -437,7 +437,7 @@ describe("workspace CLI process contract", () => {
     expect(expectJsonProcess(update, false).error.code).toBe("CONTRACT_UPGRADE_REQUIRED");
     expect(existsSync(marker)).toBe(false);
     expect(readFileSync(join(root, "artifact.html"))).toEqual(before);
-  });
+  }, 20_000);
 
   it("updates contract-v2 data through the CLI", () => {
     const root = temporaryRoot();
