@@ -22,11 +22,13 @@ const smoke = await import("./pack-smoke.mjs") as Record<string, any>;
 
 function tarballWithMetadata({
   content,
+  mode = 0o644,
   modifiedAt,
   path = "package/example.txt",
   user,
 }: {
   content: string;
+  mode?: number;
   modifiedAt: number;
   path?: string;
   user: string;
@@ -40,7 +42,7 @@ function tarballWithMetadata({
   };
   const body = Buffer.from(content);
   writeString(0, 100, path);
-  writeOctal(100, 8, 0o644);
+  writeOctal(100, 8, mode);
   writeOctal(108, 8, 501);
   writeOctal(116, 8, 20);
   writeOctal(124, 12, body.length);
@@ -234,6 +236,34 @@ describe("package boundary hardening", () => {
     );
     expect(smoke.hashTarballContents(compact, "sha256")).not.toEqual(
       smoke.hashTarballContents(changed, "sha256"),
+    );
+  });
+
+  it("normalizes host read modes while preserving executable semantics", () => {
+    const ownerRead = tarballWithMetadata({
+      content: "same bytes",
+      mode: 0o600,
+      modifiedAt: 1,
+      user: "builder",
+    });
+    const worldRead = tarballWithMetadata({
+      content: "same bytes",
+      mode: 0o644,
+      modifiedAt: 1,
+      user: "builder",
+    });
+    const executable = tarballWithMetadata({
+      content: "same bytes",
+      mode: 0o755,
+      modifiedAt: 1,
+      user: "builder",
+    });
+
+    expect(smoke.hashTarballContents(ownerRead, "sha256")).toEqual(
+      smoke.hashTarballContents(worldRead, "sha256"),
+    );
+    expect(smoke.hashTarballContents(worldRead, "sha256")).not.toEqual(
+      smoke.hashTarballContents(executable, "sha256"),
     );
   });
 

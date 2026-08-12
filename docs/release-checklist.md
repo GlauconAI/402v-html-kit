@@ -11,7 +11,7 @@ reproduced on 2026-08-11 (America/Vancouver).
 <!-- release-evidence:start -->
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "releaseVersion": "0.1.0",
   "commits": {
     "baseline": "9527b4fd8c3ff3c49180516440f715a6d1798c8f",
@@ -20,7 +20,7 @@ reproduced on 2026-08-11 (America/Vancouver).
   },
   "testTotals": {
     "baseline": { "files": 105, "tests": 703 },
-    "oss": { "files": 24, "packageCiTests": 396, "localRcTests": 397 },
+    "oss": { "files": 24, "packageCiTests": 397, "localRcTests": 398 },
     "site": { "files": 96, "passed": 524, "skipped": 1 }
   },
   "packages": [
@@ -29,7 +29,7 @@ reproduced on 2026-08-11 (America/Vancouver).
       "name": "@402v/html-kit-core",
       "version": "0.1.0",
       "tarball": "402v-html-kit-core-0.1.0.tgz",
-      "contentsSha256": "9c06bf002423de329b04a67dfb889c096cc7e725c0e83dd25cab01b80a6a5d42",
+      "contentsSha256": "450407e1b4befff7205e1994eb69957d027104993daf09413d4ba23ba9330d67",
       "fileCount": 38
     },
     {
@@ -37,7 +37,7 @@ reproduced on 2026-08-11 (America/Vancouver).
       "name": "@402v/theme-402v",
       "version": "0.1.0",
       "tarball": "402v-theme-402v-0.1.0.tgz",
-      "contentsSha256": "10e303e9697832b37b22306cbda3539e66ed0d8d8d37d077e97c0dae5dacc369",
+      "contentsSha256": "1570015f7bd33800b7f2179332fcae2e3bca227a507ee5fe0380b9fab6576cd9",
       "fileCount": 6
     },
     {
@@ -45,7 +45,7 @@ reproduced on 2026-08-11 (America/Vancouver).
       "name": "@402v/html-kit-cli",
       "version": "0.1.0",
       "tarball": "402v-html-kit-cli-0.1.0.tgz",
-      "contentsSha256": "c874198e260555820c11e47063783a23a27cc985f90dc6cfae6d385679e39678",
+      "contentsSha256": "db28d1d72c5547b9516eea36094b601ab13ca2d9375a5b71d0fb2d6de6ed0e6b",
       "fileCount": 7
     }
   ],
@@ -109,7 +109,7 @@ fe86990674d2327c53b4dc4f4b234bed70e27d33
 
 The tarballs were produced with a private temporary npm cache and
 `npm pack --ignore-scripts --workspace <name>`. The evidence canonically hashes
-each sorted file path, executable mode, and file body; the root package manifest
+each sorted file path, executable status, and file body; the root package manifest
 is canonicalized as JSON. Gzip, tar, and manifest formatting metadata from the
 host or npm version therefore cannot change the digest. Independently,
 `npm run pack:check` parsed the tarballs and reported 38 core files, six theme
@@ -121,7 +121,7 @@ files, and seven CLI files.
 | --- | --- | --- |
 | clean lock install | `npm ci` | exit 0; lockfile-only install |
 | declarations | `npm run typecheck` | exit 0 |
-| full OSS suite | `HTML_KIT_SITE_WORKTREE=<site-worktree> npm test` | 24 files; 397 tests passed; real Chrome and local cross-repository gate included |
+| full OSS suite | `HTML_KIT_SITE_WORKTREE=<site-worktree> npm test` | 24 files; 398 tests passed; real Chrome and local cross-repository gate included |
 | v1 compatibility | `npm test -- tests/compatibility` | frozen hashes, contract-v1 mutation rejection, and explicit contract-v1 upgrade passed |
 | browser acceptance | `npm test -- tests/browser` | desktop/mobile note, interactive, and custom-theme cases passed with zero external requests |
 | package boundary | `npm run pack:check` | clean offline consumer passed; file counts 7/38/6; 148 production license entries |
@@ -164,9 +164,9 @@ deterministic verified contract-v2 bytes without mutating its source.
 
 The site adapter is a separate local RC gate. Public package CI has no site
 checkout, so the conditional test is skipped when `HTML_KIT_SITE_WORKTREE` is
-absent: package-only CI therefore records 396 passing tests plus this one
+absent: package-only CI therefore records 397 passing tests plus this one
 explicit skip. A local release-candidate decision is incomplete until the
-variable is set to the isolated site-integration worktree and all 397 tests,
+variable is set to the isolated site-integration worktree and all 398 tests,
 including this command, pass:
 
 ```text

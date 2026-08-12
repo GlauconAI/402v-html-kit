@@ -1180,7 +1180,7 @@ export function hashTarballContents(archive, algorithm) {
     if (seenPaths.has(entry.path)) fail(`Duplicate tar entry: ${entry.path}`);
     seenPaths.add(entry.path);
     write(entry.path);
-    write(entry.mode & 0o777);
+    write((entry.mode & 0o111) === 0 ? 0 : 1);
     if (entry.path === "package/package.json") {
       const manifest = JSON.parse(
         new TextDecoder("utf-8", { fatal: true }).decode(entry.content),
