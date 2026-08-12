@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -168,12 +169,27 @@ function createOfflineTufCache(): string {
 }
 
 describe("trusted release helper", () => {
-  it("pins the npm-compatible official sigstore verifier as a direct dev dependency", () => {
+  it("pins Sigstore for provenance while starting verify-tag without installed development dependencies", () => {
     const manifest = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
     expect(manifest.devDependencies.sigstore).toBe("4.1.1");
     const installed = JSON.parse(readFileSync(new URL("../../node_modules/sigstore/package.json", import.meta.url), "utf8"));
     expect(installed.version).toBe("4.1.1");
     expect(installed.license).toBe("Apache-2.0");
+
+    const root = mkdtempSync(join(tmpdir(), "402v-release-verify-tag-test-"));
+    const script = join(root, "release.mjs");
+    writeFileSync(script, readFileSync(helperUrl), "utf8");
+    try {
+      const result = spawnSync(process.execPath, [script, "verify-tag"], {
+        encoding: "utf8",
+        env: {},
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("EVENT_REF is required");
+      expect(result.stderr).not.toContain("ERR_MODULE_NOT_FOUND");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("builds one escaped and anchored Fulcio identity URI from the verified source", async () => {

@@ -4,7 +4,6 @@ import { basename, join, resolve } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import sigstore from "sigstore";
 
 const SEMVER_NUMBER = "(?:0|[1-9][0-9]*)";
 const EXACT_TAG = new RegExp(`^v(${SEMVER_NUMBER}\\.${SEMVER_NUMBER}\\.${SEMVER_NUMBER})$`, "u");
@@ -158,6 +157,7 @@ export async function verifyBundleCertificate({
   certificateIssuer = GITHUB_OIDC_ISSUER,
   tufCachePath,
 }) {
+  const { default: sigstore } = await import("sigstore");
   const policy = certificateIdentityPolicy(source);
   await sigstore.verify(bundle, {
     certificateIdentityURI: policy.identityPattern,
