@@ -23,10 +23,12 @@ const smoke = await import("./pack-smoke.mjs") as Record<string, any>;
 function tarballWithMetadata({
   content,
   modifiedAt,
+  path = "package/example.txt",
   user,
 }: {
   content: string;
   modifiedAt: number;
+  path?: string;
   user: string;
 }) {
   const header = Buffer.alloc(512);
@@ -37,7 +39,7 @@ function tarballWithMetadata({
     writeString(offset, length, `${value.toString(8).padStart(length - 1, "0")}\0`);
   };
   const body = Buffer.from(content);
-  writeString(0, 100, "package/example.txt");
+  writeString(0, 100, path);
   writeOctal(100, 8, 0o644);
   writeOctal(108, 8, 501);
   writeOctal(116, 8, 20);
@@ -203,6 +205,34 @@ describe("package boundary hardening", () => {
       smoke.hashTarballContents(second, "sha256"),
     );
     expect(smoke.hashTarballContents(first, "sha256")).not.toEqual(
+      smoke.hashTarballContents(changed, "sha256"),
+    );
+  });
+
+  it("canonicalizes package manifest formatting but detects semantic drift", () => {
+    const compact = tarballWithMetadata({
+      content: '{"name":"example","version":"1.0.0"}',
+      modifiedAt: 1,
+      path: "package/package.json",
+      user: "builder",
+    });
+    const formatted = tarballWithMetadata({
+      content: '{\n  "version": "1.0.0",\n  "name": "example"\n}\n',
+      modifiedAt: 1,
+      path: "package/package.json",
+      user: "builder",
+    });
+    const changed = tarballWithMetadata({
+      content: '{"name":"example","version":"2.0.0"}',
+      modifiedAt: 1,
+      path: "package/package.json",
+      user: "builder",
+    });
+
+    expect(smoke.hashTarballContents(compact, "sha256")).toEqual(
+      smoke.hashTarballContents(formatted, "sha256"),
+    );
+    expect(smoke.hashTarballContents(compact, "sha256")).not.toEqual(
       smoke.hashTarballContents(changed, "sha256"),
     );
   });

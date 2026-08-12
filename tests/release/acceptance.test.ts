@@ -55,7 +55,7 @@ const expectedPackages = [
     name: "@402v/html-kit-core",
     version: "0.1.0",
     tarball: "402v-html-kit-core-0.1.0.tgz",
-    contentsSha256: "5a096b33682764cd8d4f6e38dbd4a695ea17f134d7fb07929aeff3ee718593b0",
+    contentsSha256: "9c06bf002423de329b04a67dfb889c096cc7e725c0e83dd25cab01b80a6a5d42",
     fileCount: 38,
   },
   {
@@ -63,7 +63,7 @@ const expectedPackages = [
     name: "@402v/theme-402v",
     version: "0.1.0",
     tarball: "402v-theme-402v-0.1.0.tgz",
-    contentsSha256: "25d42a9eb236eddc9851b1e09ec7378cbd71e9313e26d030ba41be0e5b5cfad4",
+    contentsSha256: "10e303e9697832b37b22306cbda3539e66ed0d8d8d37d077e97c0dae5dacc369",
     fileCount: 6,
   },
   {
@@ -71,13 +71,13 @@ const expectedPackages = [
     name: "@402v/html-kit-cli",
     version: "0.1.0",
     tarball: "402v-html-kit-cli-0.1.0.tgz",
-    contentsSha256: "fb5aa94064a9e76def9ee3c4705c4ba9e32679e4a46ca039abc2ff8b1961cd89",
+    contentsSha256: "c874198e260555820c11e47063783a23a27cc985f90dc6cfae6d385679e39678",
     fileCount: 7,
   },
 ] as const;
 
 type ReleaseEvidence = {
-  schemaVersion: 3;
+  schemaVersion: 4;
   releaseVersion: string;
   commits: { baseline: string; oss: string; siteIntegration: string };
   testTotals: {
@@ -510,7 +510,7 @@ describe.sequential("local release candidate acceptance", () => {
       manifest: JSON.parse(read(path)) as { name: string; version: string },
     }));
     expect(evidence).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       releaseVersion: "0.1.0",
       commits: {
         baseline: "9527b4fd8c3ff3c49180516440f715a6d1798c8f",
@@ -519,7 +519,7 @@ describe.sequential("local release candidate acceptance", () => {
       },
       testTotals: {
         baseline: { files: 105, tests: 703 },
-        oss: { files: 24, packageCiTests: 395, localRcTests: 396 },
+        oss: { files: 24, packageCiTests: 396, localRcTests: 397 },
         site: { files: 96, passed: 524, skipped: 1 },
       },
       frozenV1: frozenFixtures,

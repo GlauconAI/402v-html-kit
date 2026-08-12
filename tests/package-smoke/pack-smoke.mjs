@@ -1155,6 +1155,15 @@ function readTarEntries(tarballPath) {
   return parseTarEntries(gunzipSync(readFileSync(tarballPath)));
 }
 
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
 export function hashTarballContents(archive, algorithm) {
   const hash = createHash(algorithm);
   const { entries } = parseTarEntries(gunzipSync(archive));
@@ -1172,7 +1181,14 @@ export function hashTarballContents(archive, algorithm) {
     seenPaths.add(entry.path);
     write(entry.path);
     write(entry.mode & 0o777);
-    write(entry.content);
+    if (entry.path === "package/package.json") {
+      const manifest = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(entry.content),
+      );
+      write(canonicalJson(manifest));
+    } else {
+      write(entry.content);
+    }
   }
   return hash.digest();
 }
