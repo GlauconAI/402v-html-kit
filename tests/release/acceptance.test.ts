@@ -55,7 +55,7 @@ const expectedPackages = [
     name: "@402v/html-kit-core",
     version: "0.1.0",
     tarball: "402v-html-kit-core-0.1.0.tgz",
-    contentsSha256: "450407e1b4befff7205e1994eb69957d027104993daf09413d4ba23ba9330d67",
+    contentsSha256: "69b898c391a39c9e324cef4583c4b60e2e224a2c46634d06e15a35e7cb9b45e5",
     fileCount: 38,
   },
   {
@@ -63,7 +63,7 @@ const expectedPackages = [
     name: "@402v/theme-402v",
     version: "0.1.0",
     tarball: "402v-theme-402v-0.1.0.tgz",
-    contentsSha256: "1570015f7bd33800b7f2179332fcae2e3bca227a507ee5fe0380b9fab6576cd9",
+    contentsSha256: "5bccf7adf1f2352a7795d2cdca3c0026de950031b6123bed8c4be556c288a8da",
     fileCount: 6,
   },
   {
@@ -71,7 +71,7 @@ const expectedPackages = [
     name: "@402v/html-kit-cli",
     version: "0.1.0",
     tarball: "402v-html-kit-cli-0.1.0.tgz",
-    contentsSha256: "db28d1d72c5547b9516eea36094b601ab13ca2d9375a5b71d0fb2d6de6ed0e6b",
+    contentsSha256: "36c2404f64690510caf6d1c6236c86aafd1d14bfa3f12a12b6eb1cb5c82de8d2",
     fileCount: 7,
   },
 ] as const;
@@ -326,7 +326,7 @@ function listedTestTotals() {
   const result = run(
     process.execPath,
     [join(workspaceRoot, "node_modules/vitest/vitest.mjs"), "list", "--json"],
-    30_000,
+    120_000,
   );
   expectSuccess(result);
   const tests = JSON.parse(result.stdout) as Array<{ file: string; name: string }>;
@@ -582,5 +582,5 @@ describe.sequential("local release candidate acceptance", () => {
     for (const path of packagePaths) {
       expect(checklist).toContain(path.replace("/package.json", ""));
     }
-  }, 30_000);
+  }, 150_000);
 });

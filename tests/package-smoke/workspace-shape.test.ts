@@ -28,6 +28,10 @@ describe("workspace package shape", () => {
       expect(manifest.private).not.toBe(true);
       expect(manifest.type).toBe("module");
       expect(manifest.license).toBe("MIT");
+      expect(manifest.repository).toEqual({
+        type: "git",
+        url: "https://github.com/GlauconAI/402v-html-kit",
+      });
       expect(manifest.engines).toEqual(
         expect.objectContaining({ node: "^22.13.0 || >=24.0.0" }),
       );
